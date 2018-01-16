@@ -63,10 +63,12 @@ impl<T: Ipc> Copa<T> {
     }
 
     fn install_fold(&self) -> Option<Scope> {
-        match self.control_channel.install_measurement(
-            self.sock_id,
-            "
-                (def (acked 0) (sacked 0) (loss 0) (timeout false) (rtt 0) (inflight 0) (minrtt +infinity))
+        let mut min_rtt = self.min_rtt;
+        if self.min_rtt == std::u32::MAX {
+            min_rtt = 0
+        }
+        print!("
+                (def (acked 0) (sacked 0) (loss 0) (timeout false) (rtt 0) (inflight 0) (minrtt +infinity) (overcnt 0) (undercnt 0))
                 (bind Flow.inflight Pkt.packets_in_flight)
                 (bind Flow.rtt Pkt.rtt_sample_us)
                 (bind Flow.minrtt (min Flow.minrtt Pkt.rtt_sample_us))
@@ -76,22 +78,49 @@ impl<T: Ipc> Copa<T> {
                 (bind Flow.timeout Pkt.was_timeout)
                 (bind isUrgent Pkt.was_timeout)
                 (bind isUrgent (!if isUrgent (> Flow.loss 0)))
-            "
+                (bind minrtt {})
+                (bind threshold (/ (- Pkt.rtt_sample_us minrtt) {}))
+                (bind threshold (if (== minrtt 0) (+ 0 0)))
+                (bind increase (> (div (* 1460 Pkt.rtt_sample_us) Cwnd) threshold))
+                (bind Flow.overcnt (if increase (+ Flow.overcnt 1)))
+                (bind Flow.undercnt (!if increase (+ Flow.undercnt 1)))
+            ", min_rtt, (1. / self.delta) as u32);
+        //  (* {} (- Pkt.rtt_sample_us {})))
+        // (> (div (* 1460 Pkt.rtt_sample_us) Cwnd) threshold))
+        // (if increase (+ Flow.over_cnt 1))
+        // (!if increase (+ Flow.under_cnt 1))
+        Some(self.control_channel.install_measurement(
+            self.sock_id,
+            format!("
+                (def (acked 0) (sacked 0) (loss 0) (timeout false) (rtt 0) (inflight 0) (minrtt +infinity) (overcnt 0) (undercnt 0))
+                (bind Flow.inflight Pkt.packets_in_flight)
+                (bind Flow.rtt Pkt.rtt_sample_us)
+                (bind Flow.minrtt (min Flow.minrtt Pkt.rtt_sample_us))
+                (bind Flow.acked (+ Flow.acked Pkt.bytes_acked))
+                (bind Flow.sacked (+ Flow.sacked Pkt.packets_misordered))
+                (bind Flow.loss Pkt.lost_pkts_sample)
+                (bind Flow.timeout Pkt.was_timeout)
+                (bind isUrgent Pkt.was_timeout)
+                (bind isUrgent (!if isUrgent (> Flow.loss 0)))
+                (bind minrtt {})
+                (bind threshold (/ (- Pkt.rtt_sample_us minrtt) {}))
+                (bind threshold (if (== minrtt 0) (+ 0 0)))
+                (bind increase (> (div (* 1460 Pkt.rtt_sample_us) Cwnd) threshold))
+                (bind Flow.overcnt (if increase (+ Flow.overcnt 1)))
+                (bind Flow.undercnt (!if increase (+ Flow.undercnt 1)))
+            ", min_rtt, (1. / self.delta) as u32)
                 .as_bytes(),
-        ) {
-            Ok(s) => Some(s),
-            Err(_) => None,
-        }
+        ).unwrap())
     }
 
-    fn get_fields(&mut self, m: Measurement) -> (u32, bool, u32, u32, u32, u32, u32) {
+    fn get_fields(&mut self, m: Measurement) -> (u32, bool, u32, u32, u32, u32, u32, u32, u32) {
         let sc = self.sc.as_ref().expect("scope should be initialized");
-        let ack = m.get_field(&String::from("Flow.acked"), sc).expect(
-            "expected acked field in returned measurement",
-        ) as u32;
-
         let sack = m.get_field(&String::from("Flow.sacked"), sc).expect(
             "expected sacked field in returned measurement",
+        ) as u32;
+
+        let ack = m.get_field(&String::from("Flow.acked"), sc).expect(
+            "expected acked field in returned measurement",
         ) as u32;
 
         let was_timeout = m.get_field(&String::from("Flow.timeout"), sc).expect(
@@ -114,12 +143,21 @@ impl<T: Ipc> Copa<T> {
             "expected minrtt field in returned measurement",
         ) as u32;
 
-        (ack, was_timeout == 1, sack, loss, rtt, inflight, min_rtt)
+        let over_cnt = m.get_field(&String::from("Flow.overcnt"), sc).expect(
+            "expected overcnt field in returned measurement",
+        ) as u32;
+
+        let under_cnt = m.get_field(&String::from("Flow.undercnt"), sc).expect(
+            "expected undercnt field in returned measurement",
+        ) as u32;
+
+        (ack, was_timeout == 1, sack, loss, rtt, inflight, min_rtt, over_cnt, under_cnt)
     }
 
-    fn delay_control(&mut self, rtt: u32, acked: u32) {
-        // Equation rearranged to avoid integer division
-        let increase = rtt as u64 * 1460u64 > (((rtt - self.min_rtt) as f64) * self.delta as f64 * self.cwnd as f64) as u64;
+    fn delay_control(&mut self, over_cnt: u32, under_cnt: u32, acked: u32) {
+        // // Equation rearranged to avoid integer division
+        // let increase = rtt as u64 * 1460u64 > (((rtt - self.min_rtt) as f64) * self.delta as f64 * self.cwnd as f64) as u64;
+        let increase = over_cnt > under_cnt;
         if self.slow_start {
             if increase {
                 self.cwnd += acked;
@@ -193,7 +231,7 @@ impl<T: Ipc> Copa<T> {
 impl<T: Ipc> CongAlg<T> for Copa<T> {
     type Config = CopaConfig;
 
-    fn name(&self) -> String {
+    fn name() -> String {
         String::from("copa")
     }
 
@@ -220,13 +258,13 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
             info!(log, "starting copa flow"; "sock_id" => info.sock_id);
         });
 
-        s.sc = s.install_fold();
+        s.sc = Some(s.install_fold().expect("could not install fold function"));
         s.send_pattern();
         s
     }
 
     fn measurement(&mut self, _sock_id: u32, m: Measurement) {
-        let (acked, was_timeout, sacked, loss, rtt, inflight, min_rtt) = self.get_fields(m);
+        let (acked, was_timeout, sacked, loss, rtt, inflight, min_rtt, over_cnt, under_cnt) = self.get_fields(m);
         if was_timeout {
             self.handle_timeout();
             return;
@@ -236,7 +274,7 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
         }
 
         // increase the cwnd corresponding to new in-order cumulative ACKs
-        self.delay_control(rtt, acked);
+        self.delay_control(over_cnt, under_cnt, acked);
 
         if loss > 0 || sacked > 0 {
             self.cwnd_reduction(loss, sacked, acked);
@@ -254,6 +292,7 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
         }
 
         self.send_pattern();
+        self.sc = Some(self.install_fold().expect("could not install fold function"));
 
         self.logger.as_ref().map(|log| {
             debug!(log, "got ack";
