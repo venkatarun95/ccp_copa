@@ -65,7 +65,8 @@ impl<T: Ipc> Copa<T> {
     fn install_fold(&self) -> Option<Scope> {
         let mut min_rtt = self.min_rtt;
         if self.min_rtt == std::u32::MAX {
-            min_rtt = 0
+            // Fold functions onlys support 30-bit values
+            min_rtt = 0x3fffffff;
         }
         print!("
                 (def (acked 0) (sacked 0) (loss 0) (timeout false) (rtt 0) (inflight 0) (minrtt +infinity) (overcnt 0) (undercnt 0))
@@ -92,19 +93,17 @@ impl<T: Ipc> Copa<T> {
         Some(self.control_channel.install_measurement(
             self.sock_id,
             format!("
-                (def (acked 0) (sacked 0) (loss 0) (timeout false) (rtt 0) (inflight 0) (minrtt +infinity) (overcnt 0) (undercnt 0))
-                (bind Flow.inflight Pkt.packets_in_flight)
+                (def (acked 0) (sacked 0) (loss 0) (timeout false) (rtt 0) (minrtt +infinity) (overcnt 0) (undercnt 0))
                 (bind Flow.rtt Pkt.rtt_sample_us)
                 (bind Flow.minrtt (min Flow.minrtt Pkt.rtt_sample_us))
+                (bind Flow.minrtt (min Flow.minrtt {}))
                 (bind Flow.acked (+ Flow.acked Pkt.bytes_acked))
                 (bind Flow.sacked (+ Flow.sacked Pkt.packets_misordered))
                 (bind Flow.loss Pkt.lost_pkts_sample)
                 (bind Flow.timeout Pkt.was_timeout)
                 (bind isUrgent Pkt.was_timeout)
                 (bind isUrgent (!if isUrgent (> Flow.loss 0)))
-                (bind minrtt {})
-                (bind threshold (/ (- Pkt.rtt_sample_us minrtt) {}))
-                (bind threshold (if (== minrtt 0) (+ 0 0)))
+                (bind threshold (/ (- Pkt.rtt_sample_us Flow.minrtt) {}))
                 (bind increase (> (div (* 1460 Pkt.rtt_sample_us) Cwnd) threshold))
                 (bind Flow.overcnt (if increase (+ Flow.overcnt 1)))
                 (bind Flow.undercnt (!if increase (+ Flow.undercnt 1)))
