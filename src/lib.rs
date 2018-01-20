@@ -53,6 +53,8 @@ impl<T: Ipc> Copa<T> {
         match self.control_channel.send_pattern(
             self.sock_id,
             make_pattern!(
+                // In bytes/s
+                pattern::Event::SetRateAbs((2 * self.cwnd as u64 * 1000000 / self.min_rtt as u64) as u32) =>
                 pattern::Event::SetCwndAbs(self.cwnd) =>
                 pattern::Event::WaitRtts(1.0) => 
                 pattern::Event::Report
@@ -158,11 +160,15 @@ impl<T: Ipc> Copa<T> {
             if (self.cur_direction.abs() as u64) < self.pkts_in_last_rtt * 2 / 3 {
                 self.cur_direction = 0;
             }
-            if self.prev_direction * self.cur_direction > 0 {
+            if (self.prev_direction > 0 && self.cur_direction > 0)
+                || (self.prev_direction < 0 && self.cur_direction < 0) {
                 self.velocity *= 2;
             }
             else {
                 self.velocity = 1;
+            }
+            if self.velocity > 0xffff {
+                self.velocity = 0xffff;
             }
             self.prev_direction = self.cur_direction;
             self.cur_direction = 0;
@@ -182,7 +188,15 @@ impl<T: Ipc> Copa<T> {
         else {
             // Do computations in u64 to avoid overflow. Multiply first so
             // integer division doesn't cause as many problems
-            let change = self.velocity * (1448 * ((over_cnt + under_cnt) as u64) / (self.cwnd as u64)) as u32;
+            let change = (self.velocity as u64 * 1448 * ((over_cnt + under_cnt) as u64) / (self.cwnd as u64)) as u32;
+            self.logger.as_ref().map(|log| {
+                debug!(log, "delay control";
+                       "cwnd" => self.cwnd,
+                       "change" => change,
+                       "init_cwnd" => self.init_cwnd,
+                );
+            });
+
             if increase {
                 self.cwnd += change;
             }
