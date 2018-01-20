@@ -56,7 +56,7 @@ impl<T: Ipc> Copa<T> {
                 // In bytes/s
                 pattern::Event::SetRateAbs((2 * self.cwnd as u64 * 1000000 / self.min_rtt as u64) as u32) =>
                 pattern::Event::SetCwndAbs(self.cwnd) =>
-                pattern::Event::WaitRtts(1.0) => 
+                pattern::Event::WaitRtts(0.5) => 
                 pattern::Event::Report
             ),
         ) {
@@ -78,29 +78,30 @@ impl<T: Ipc> Copa<T> {
         Some(self.control_channel.install_measurement(
             self.sock_id,
             format!("
-                (def (sacked 0) (loss 0) (inflight 0) (timeout false) (rtt 0) (now 0
-) (minrtt +infinity) (overcnt 0) (undercnt 0))
+                (def (acked 0) (sacked 0) (loss 0) (inflight 0) (timeout false) (rtt 0) (now 0
+) (minrtt +infinity))
+                (bind Flow.acked (+ Flow.acked Pkt.bytes_acked))
                 (bind Flow.inflight Pkt.packets_in_flight)
                 (bind Flow.rtt Pkt.rtt_sample_us)
                 (bind Flow.minrtt (min Flow.minrtt Pkt.rtt_sample_us))
-                (bind Flow.minrtt (min Flow.minrtt {}))
                 (bind Flow.sacked (+ Flow.sacked Pkt.packets_misordered))
                 (bind Flow.loss Pkt.lost_pkts_sample)
                 (bind Flow.timeout Pkt.was_timeout)
                 (bind Flow.now Pkt.now)
                 (bind isUrgent Pkt.was_timeout)
                 (bind isUrgent (!if isUrgent (> Flow.loss 0)))
-                (bind threshold (/ (- Pkt.rtt_sample_us Flow.minrtt) {}))
-                (bind increase (> (/ (* 1460 Pkt.rtt_sample_us) {}) threshold))
-                (bind Flow.overcnt (if increase (+ Flow.overcnt Pkt.bytes_acked)))
-                (bind Flow.undercnt (!if increase (+ Flow.undercnt Pkt.bytes_acked)))
-            ", min_rtt, (1. / self.delta) as u32, self.cwnd)
+            ")
                 .as_bytes(),
         ).unwrap())
     }
 
-    fn get_fields(&mut self, m: Measurement) -> (bool, u32, u32, u32, u32, u64, u32, u64, u64) {
+    fn get_fields(&mut self, m: Measurement) -> (u32, bool, u32, u32, u32, u32, u64, u32) {
         let sc = self.sc.as_ref().expect("scope should be initialized");
+
+        let acked = m.get_field(&String::from("Flow.acked"), sc).expect(
+            "expected acked field in returned measurement",
+        ) as u32;
+
         let sack = m.get_field(&String::from("Flow.sacked"), sc).expect(
             "expected sacked field in returned measurement",
         ) as u32;
@@ -129,26 +130,23 @@ impl<T: Ipc> Copa<T> {
             "expected minrtt field in returned measurement",
         ) as u32;
 
-        let over_cnt = m.get_field(&String::from("Flow.overcnt"), sc).expect(
-            "expected overcnt field in returned measurement",
-        ) as u64;
-
-        let under_cnt = m.get_field(&String::from("Flow.undercnt"), sc).expect(
-            "expected undercnt field in returned measurement",
-        ) as u64;
-
-        (was_timeout == 1, sack, loss, inflight, rtt, now, min_rtt, over_cnt, under_cnt)
+        (acked, was_timeout == 1, sack, loss, inflight, rtt, now, min_rtt)
     }
 
-    fn delay_control(&mut self, over_cnt: u64, under_cnt: u64, rtt: u32, now: u64) {
-        let increase = over_cnt > under_cnt;
+    fn delay_control(&mut self, rtt: u32, acked: u32, now: u64) {
+        let increase = rtt as u64 * 1460u64 > (((rtt - self.min_rtt) as f64) * self.delta as f64 * self.cwnd as f64) as u64;
 
         // Update velocity
-        self.cur_direction += over_cnt as i64 - under_cnt as i64;
-        self.pkts_in_last_rtt += over_cnt + under_cnt;
+        if increase {
+            self.cur_direction += 1;
+        }
+        else {
+            self.cur_direction -= 1;
+        }
+        //self.pkts_in_last_rtt += over_cnt + under_cnt;
         // TODO(venkatar): Time (now) may be a u32 internally, which means it
         // will wrap around. Handle this.
-        if (now - self.prev_update_rtt) as u32 >= rtt {
+        if (now - self.prev_update_rtt) as u32 >= rtt && !self.slow_start {
             self.logger.as_ref().map(|log| {
                 debug!(log, "velocity control";
                       "cur_direction" => self.cur_direction,
@@ -157,9 +155,9 @@ impl<T: Ipc> Copa<T> {
                 );
             });
 
-            if (self.cur_direction.abs() as u64) < self.pkts_in_last_rtt * 2 / 3 {
-                self.cur_direction = 0;
-            }
+            // if (self.cur_direction.abs() as u64) < self.pkts_in_last_rtt * 2 / 3 {
+            //     self.cur_direction = 0;
+            // }
             if (self.prev_direction > 0 && self.cur_direction > 0)
                 || (self.prev_direction < 0 && self.cur_direction < 0) {
                 self.velocity *= 2;
@@ -172,14 +170,14 @@ impl<T: Ipc> Copa<T> {
             }
             self.prev_direction = self.cur_direction;
             self.cur_direction = 0;
-            self.pkts_in_last_rtt = 0;
+            //self.pkts_in_last_rtt = 0;
             self.prev_update_rtt = now;
         }
 
         // Change window
         if self.slow_start {
             if increase {
-                self.cwnd += (over_cnt - under_cnt) as u32;
+                self.cwnd += acked;
             }
             else {
                 self.slow_start = false;
@@ -188,7 +186,7 @@ impl<T: Ipc> Copa<T> {
         else {
             // Do computations in u64 to avoid overflow. Multiply first so
             // integer division doesn't cause as many problems
-            let change = (self.velocity as u64 * 1448 * ((over_cnt + under_cnt) as u64) / (self.cwnd as u64)) as u32;
+            let change = (self.velocity as u64 * 1448 * (acked as u64) / (self.cwnd as u64)) as u32;
             self.logger.as_ref().map(|log| {
                 debug!(log, "delay control";
                        "cwnd" => self.cwnd,
@@ -296,7 +294,7 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
     }
 
     fn measurement(&mut self, _sock_id: u32, m: Measurement) {
-        let (was_timeout, sacked, loss, inflight, rtt, now, min_rtt, over_cnt, under_cnt) = self.get_fields(m);
+        let (acked, was_timeout, sacked, loss, inflight, rtt, now, min_rtt) = self.get_fields(m);
         if was_timeout {
             self.handle_timeout();
             return;
@@ -306,9 +304,9 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
         }
 
         // increase/decrease the cwnd corresponding to new measurements
-        self.delay_control(over_cnt, under_cnt, rtt, now);
+        self.delay_control(min_rtt, acked, now);
 
-        let acked = (over_cnt + under_cnt) as u32;
+        //let acked = (over_cnt + under_cnt) as u32;
         if loss > 0 || sacked > 0 {
             self.cwnd_reduction(loss, sacked, acked);
         } else if acked < self.curr_cwnd_reduction {
@@ -325,7 +323,7 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
         }
 
         self.send_pattern();
-        self.sc = Some(self.install_fold().expect("could not install fold function"));
+        //self.sc = Some(self.install_fold().expect("could not install fold function"));
 
         self.logger.as_ref().map(|log| {
             debug!(log, "got ack";
