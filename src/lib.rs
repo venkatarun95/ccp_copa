@@ -49,12 +49,16 @@ impl Default for CopaConfig {
 }
 
 impl<T: Ipc> Copa<T> {
+    fn compute_intersend(&self) -> u32 {
+        (2 * self.cwnd as u64 * 1000000 / self.min_rtt as u64) as u32
+    }
+
     fn send_pattern(&self) {
         match self.control_channel.send_pattern(
             self.sock_id,
             make_pattern!(
                 // In bytes/s
-                pattern::Event::SetRateAbs((2 * self.cwnd as u64 * 1000000 / self.min_rtt as u64) as u32) =>
+                pattern::Event::SetRateAbs(self.compute_intersend()) =>
                 pattern::Event::SetCwndAbs(self.cwnd) =>
                 pattern::Event::WaitRtts(0.5) => 
                 pattern::Event::Report
@@ -186,7 +190,7 @@ impl<T: Ipc> Copa<T> {
         else {
             // Do computations in u64 to avoid overflow. Multiply first so
             // integer division doesn't cause as many problems
-            let change = (self.velocity as u64 * 1448 * (acked as u64) / (self.cwnd as u64)) as u32;
+            let change = (self.velocity as u64 * 1448 * (acked as u64) / (self.cwnd as f32 * self.delta) as u64) as u32;
             self.logger.as_ref().map(|log| {
                 debug!(log, "delay control";
                        "cwnd" => self.cwnd,
