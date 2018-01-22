@@ -44,7 +44,7 @@ fn make_args() -> Result<(ccp_copa::CopaConfig, String), std::num::ParseIntError
         ccp_copa::CopaConfig {
             init_cwnd: u32::from_str_radix(matches.value_of("init_cwnd").unwrap(), 10)?,
             default_delta: (matches.value_of("default_delta").unwrap()).parse().unwrap(),
-            delta_mode: ccp_copa::DeltaMode::Constant,
+            delta_mode: ccp_copa::DeltaModeConf::Auto,
         },
         String::from(matches.value_of("ipc").unwrap()),
     ))

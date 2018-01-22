@@ -10,10 +10,62 @@ use portus::pattern;
 use portus::ipc::Ipc;
 use portus::lang::Scope;
 
+#[derive(Eq, PartialEq)]
+enum DeltaMode {Default, TCPCoop, Loss}
+
+struct DeltaManager {
+    prev_cycle: bool,
+    cur_cycle: bool,
+    prev_update_rtt: u64,
+    switch_mode: DeltaModeConf,
+    cur_mode: DeltaMode,
+    delta: f32,
+}
+
+impl DeltaManager {
+    fn new(mode: DeltaModeConf) -> Self {
+        Self {
+            prev_cycle: true,
+            cur_cycle: true,
+            prev_update_rtt: 0,
+            switch_mode: mode,
+            cur_mode: DeltaMode::Default,
+            delta: 0.5,
+        }
+    }
+
+    fn report_rtt_measurement(&mut self, rtt: u32, min_rtt:
+                              u32, intersend: u32, now: u64) {
+        if rtt < min_rtt + 4 * (rtt - min_rtt) {
+            self.cur_cycle = true;
+        }
+        if now > self.prev_update_rtt + 2 * min_rtt as u64 {
+            println!("Trying mode switch: {} {} {}", rtt, min_rtt, intersend);
+            if self.switch_mode == DeltaModeConf::Constant
+                || (self.cur_cycle && self.prev_cycle) {
+                    if self.cur_mode != DeltaMode::Default {
+                    println!("Switched to default mode")
+                }
+                self.cur_mode = DeltaMode::Default;
+            }
+            else {
+                if self.cur_mode != DeltaMode::TCPCoop {
+                    println!("Switched to TCPCoop mode");
+                }
+                self.cur_mode = DeltaMode::TCPCoop;
+            }
+            self.prev_update_rtt = now;
+            self.prev_cycle = self.cur_cycle;
+            self.cur_cycle = false;
+        }
+    }
+}
+
 pub struct Copa<T: Ipc> {
     control_channel: Datapath<T>,
     logger: Option<slog::Logger>,
     sc: Option<Scope>,
+    delta_manager: DeltaManager,
     sock_id: u32,
     cwnd: u32,
     curr_cwnd_reduction: u32,
@@ -28,14 +80,14 @@ pub struct Copa<T: Ipc> {
     prev_update_rtt: u64,
 }
 
-#[derive(Clone)]
-pub enum DeltaMode {Constant, Auto}
+#[derive(Clone, Eq, PartialEq)]
+pub enum DeltaModeConf {Constant, Auto}
 
 #[derive(Clone)]
 pub struct CopaConfig {
     pub init_cwnd: u32,
     pub default_delta: f32,
-    pub delta_mode: DeltaMode,
+    pub delta_mode: DeltaModeConf,
 }
 
 impl Default for CopaConfig {
@@ -43,13 +95,13 @@ impl Default for CopaConfig {
         CopaConfig {
             init_cwnd: 0,
             default_delta: 0.5,
-            delta_mode: DeltaMode::Auto,
+            delta_mode: DeltaModeConf::Auto,
         }
     }
 }
 
 impl<T: Ipc> Copa<T> {
-    fn compute_intersend(&self) -> u32 {
+    fn compute_rate(&self) -> u32 {
         (2 * self.cwnd as u64 * 1000000 / self.min_rtt as u64) as u32
     }
 
@@ -58,7 +110,7 @@ impl<T: Ipc> Copa<T> {
             self.sock_id,
             make_pattern!(
                 // In bytes/s
-                pattern::Event::SetRateAbs(self.compute_intersend()) =>
+                pattern::Event::SetRateAbs(self.compute_rate()) =>
                 pattern::Event::SetCwndAbs(self.cwnd) =>
                 pattern::Event::WaitRtts(0.5) => 
                 pattern::Event::Report
@@ -159,9 +211,6 @@ impl<T: Ipc> Copa<T> {
                 );
             });
 
-            // if (self.cur_direction.abs() as u64) < self.pkts_in_last_rtt * 2 / 3 {
-            //     self.cur_direction = 0;
-            // }
             if (self.prev_direction > 0 && self.cur_direction > 0)
                 || (self.prev_direction < 0 && self.cur_direction < 0) {
                 self.velocity *= 2;
@@ -272,6 +321,7 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
             init_cwnd: info.init_cwnd,
             curr_cwnd_reduction: 0,
             sc: None,
+            delta_manager: DeltaManager::new(cfg.config.delta_mode),
             sock_id: info.sock_id,
             slow_start: true,
             delta: cfg.config.default_delta,
@@ -307,7 +357,11 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
             self.min_rtt = min_rtt;
         }
 
-        // increase/decrease the cwnd corresponding to new measurements
+        // Update delta mode
+        let intersend = self.min_rtt * 1460 / self.cwnd;
+        self.delta_manager.report_rtt_measurement(min_rtt, self.min_rtt, intersend, now);
+
+        // Increase/decrease the cwnd corresponding to new measurements
         self.delay_control(min_rtt, acked, now);
 
         //let acked = (over_cnt + under_cnt) as u32;
