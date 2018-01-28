@@ -36,6 +36,7 @@ impl DeltaManager {
 
     fn report_rtt_measurement(&mut self, rtt: u32, min_rtt:
                               u32, intersend: u32, now: u64) {
+        return;
         if rtt < min_rtt + 4 * (rtt - min_rtt) {
             self.cur_cycle = true;
         }
@@ -112,7 +113,7 @@ impl<T: Ipc> Copa<T> {
                 // In bytes/s
                 pattern::Event::SetRateAbs(self.compute_rate()) =>
                 pattern::Event::SetCwndAbs(self.cwnd) =>
-                pattern::Event::WaitRtts(0.5) => 
+                pattern::Event::WaitRtts(0.25) => 
                 pattern::Event::Report
             ),
         ) {
@@ -202,7 +203,8 @@ impl<T: Ipc> Copa<T> {
         //self.pkts_in_last_rtt += over_cnt + under_cnt;
         // TODO(venkatar): Time (now) may be a u32 internally, which means it
         // will wrap around. Handle this.
-        if (now - self.prev_update_rtt) as u32 >= rtt && !self.slow_start {
+
+        if now - self.prev_update_rtt >= rtt as u64 && !self.slow_start {
             self.logger.as_ref().map(|log| {
                 debug!(log, "velocity control";
                       "cur_direction" => self.cur_direction,
@@ -237,9 +239,13 @@ impl<T: Ipc> Copa<T> {
             }
         }
         else {
+            let mut velocity = 1u64;
+            if (increase && self.prev_direction > 0) || (!increase && self.prev_direction < 0) {
+                velocity = self.velocity as u64;
+            }
             // Do computations in u64 to avoid overflow. Multiply first so
             // integer division doesn't cause as many problems
-            let change = (self.velocity as u64 * 1448 * (acked as u64) / (self.cwnd as f32 * self.delta) as u64) as u32;
+            let change = (velocity * 1448 * (acked as u64) / (self.cwnd as f32 * self.delta) as u64) as u32;
             self.logger.as_ref().map(|log| {
                 debug!(log, "delay control";
                        "cwnd" => self.cwnd,
@@ -254,6 +260,7 @@ impl<T: Ipc> Copa<T> {
             else {
                 if change + self.init_cwnd > self.cwnd {
                     self.cwnd = self.init_cwnd;
+                    self.velocity = 1;
                 }
                 else {
                     self.cwnd -= change;
@@ -349,6 +356,10 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
 
     fn measurement(&mut self, _sock_id: u32, m: Measurement) {
         let (acked, was_timeout, sacked, loss, inflight, rtt, now, min_rtt) = self.get_fields(m);
+        if acked == 0 {
+            // Nothing happened, so ignore
+            return;
+        }
         if was_timeout {
             self.handle_timeout();
             return;
