@@ -190,9 +190,13 @@ impl<T: Ipc> Copa<T> {
         (acked, was_timeout == 1, sack, loss, inflight, rtt, now, min_rtt)
     }
 
-    fn delay_control(&mut self, rtt: u32, acked: u32, now: u64) {
+    fn delay_control(&mut self, rtt: u32, actual_acked: u32, now: u64) {
         let increase = rtt as u64 * 1460u64 > (((rtt - self.min_rtt) as f64) * self.delta as f64 * self.cwnd as f64) as u64;
 
+	let mut acked = actual_acked;
+	if actual_acked > self.cwnd / 4 {
+	   acked = self.cwnd / 4;
+	}
         // Update velocity
         if increase {
             self.cur_direction += 1;
