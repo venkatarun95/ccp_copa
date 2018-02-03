@@ -10,6 +10,9 @@ use portus::pattern;
 use portus::ipc::Ipc;
 use portus::lang::Scope;
 
+mod rtt_window;
+use rtt_window::RTTWindow;
+
 #[derive(Eq, PartialEq)]
 enum DeltaMode {Default, TCPCoop, Loss}
 
@@ -73,7 +76,7 @@ pub struct Copa<T: Ipc> {
     init_cwnd: u32,
     slow_start: bool,
     delta: f32,
-    min_rtt: u32,
+    rtt_win: RTTWindow,
     pkts_in_last_rtt: u64,
     velocity: u32,
     cur_direction: i64,
@@ -103,7 +106,7 @@ impl Default for CopaConfig {
 
 impl<T: Ipc> Copa<T> {
     fn compute_rate(&self) -> u32 {
-        (2 * self.cwnd as u64 * 1000000 / self.min_rtt as u64) as u32
+        (2 * self.cwnd as u64 * 1000000 / self.rtt_win.get_min_rtt() as u64) as u32
     }
 
     fn send_pattern(&self) {
@@ -113,7 +116,7 @@ impl<T: Ipc> Copa<T> {
                 // In bytes/s
                 pattern::Event::SetRateAbs(self.compute_rate()) =>
                 pattern::Event::SetCwndAbs(self.cwnd) =>
-                pattern::Event::WaitRtts(0.25) => 
+                pattern::Event::WaitRtts(0.5) => 
                 pattern::Event::Report
             ),
         ) {
@@ -127,14 +130,9 @@ impl<T: Ipc> Copa<T> {
     }
 
     fn install_fold(&self) -> Option<Scope> {
-        let mut min_rtt = self.min_rtt;
-        if self.min_rtt == std::u32::MAX {
-            // Fold functions onlys support 30-bit values
-            min_rtt = 0x3fffffff;
-        }
         Some(self.control_channel.install_measurement(
             self.sock_id,
-            format!("
+            "
                 (def (acked 0) (sacked 0) (loss 0) (inflight 0) (timeout false) (rtt 0) (now 0
 ) (minrtt +infinity))
                 (bind Flow.acked (+ Flow.acked Pkt.bytes_acked))
@@ -147,8 +145,7 @@ impl<T: Ipc> Copa<T> {
                 (bind Flow.now Pkt.now)
                 (bind isUrgent Pkt.was_timeout)
                 (bind isUrgent (!if isUrgent (> Flow.loss 0)))
-            ")
-                .as_bytes(),
+            ".as_bytes(),
         ).unwrap())
     }
 
@@ -191,7 +188,7 @@ impl<T: Ipc> Copa<T> {
     }
 
     fn delay_control(&mut self, rtt: u32, acked: u32, now: u64) {
-        let increase = rtt as u64 * 1460u64 > (((rtt - self.min_rtt) as f64) * self.delta as f64 * self.cwnd as f64) as u64;
+        let increase = rtt as u64 * 1460u64 > (((rtt - self.rtt_win.get_min_rtt()) as f64) * self.delta as f64 * self.cwnd as f64) as u64;
 
         // Update velocity
         if increase {
@@ -332,7 +329,7 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
             sock_id: info.sock_id,
             slow_start: true,
             delta: cfg.config.default_delta,
-            min_rtt: std::u32::MAX,
+            rtt_win: RTTWindow::new(),
             pkts_in_last_rtt: 0,
             velocity: 1,
             cur_direction: 0,
@@ -364,13 +361,11 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
             self.handle_timeout();
             return;
         }
-        if self.min_rtt > min_rtt {
-            self.min_rtt = min_rtt;
-        }
+        self.rtt_win.new_rtt_sample(min_rtt, now);
 
         // Update delta mode
-        let intersend = self.min_rtt * 1460 / self.cwnd;
-        self.delta_manager.report_rtt_measurement(min_rtt, self.min_rtt, intersend, now);
+        let intersend = self.rtt_win.get_min_rtt() * 1460 / self.cwnd;
+        self.delta_manager.report_rtt_measurement(min_rtt, self.rtt_win.get_min_rtt(), intersend, now);
 
         // Increase/decrease the cwnd corresponding to new measurements
         self.delay_control(min_rtt, acked, now);
@@ -402,7 +397,7 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
                 "loss" => loss,
                 "delta" => self.delta,
                 "rtt" => rtt,
-                "min_rtt" => self.min_rtt,
+                "min_rtt" => self.rtt_win.get_min_rtt(),
                 "velocity" => self.velocity,
             );
         });
