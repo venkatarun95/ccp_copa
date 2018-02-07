@@ -11,59 +11,10 @@ use portus::ipc::Ipc;
 use portus::lang::Scope;
 
 mod rtt_window;
+mod delta_manager;
 use rtt_window::RTTWindow;
-
-#[derive(Eq, PartialEq)]
-enum DeltaMode {Default, TCPCoop, Loss}
-
-struct DeltaManager {
-    prev_cycle: bool,
-    cur_cycle: bool,
-    prev_update_rtt: u64,
-    switch_mode: DeltaModeConf,
-    cur_mode: DeltaMode,
-    delta: f32,
-}
-
-impl DeltaManager {
-    fn new(mode: DeltaModeConf) -> Self {
-        Self {
-            prev_cycle: true,
-            cur_cycle: true,
-            prev_update_rtt: 0,
-            switch_mode: mode,
-            cur_mode: DeltaMode::Default,
-            delta: 0.5,
-        }
-    }
-
-    fn report_rtt_measurement(&mut self, rtt: u32, min_rtt:
-                              u32, intersend: u32, now: u64) {
-        return;
-        if rtt < min_rtt + 4 * (rtt - min_rtt) {
-            self.cur_cycle = true;
-        }
-        if now > self.prev_update_rtt + 2 * min_rtt as u64 {
-            println!("Trying mode switch: {} {} {}", rtt, min_rtt, intersend);
-            if self.switch_mode == DeltaModeConf::Constant
-                || (self.cur_cycle && self.prev_cycle) {
-                    if self.cur_mode != DeltaMode::Default {
-                    println!("Switched to default mode")
-                }
-                self.cur_mode = DeltaMode::Default;
-            }
-            else {
-                if self.cur_mode != DeltaMode::TCPCoop {
-                    println!("Switched to TCPCoop mode");
-                }
-                self.cur_mode = DeltaMode::TCPCoop;
-            }
-            self.prev_update_rtt = now;
-            self.prev_cycle = self.cur_cycle;
-            self.cur_cycle = false;
-        }
-    }
-}
+use delta_manager::DeltaManager;
+pub use delta_manager::DeltaModeConf;
 
 pub struct Copa<T: Ipc> {
     control_channel: Datapath<T>,
@@ -72,10 +23,8 @@ pub struct Copa<T: Ipc> {
     delta_manager: DeltaManager,
     sock_id: u32,
     cwnd: u32,
-    curr_cwnd_reduction: u32,
     init_cwnd: u32,
     slow_start: bool,
-    delta: f32,
     rtt_win: RTTWindow,
     pkts_in_last_rtt: u64,
     velocity: u32,
@@ -83,9 +32,6 @@ pub struct Copa<T: Ipc> {
     prev_direction: i64,
     prev_update_rtt: u64,
 }
-
-#[derive(Clone, Eq, PartialEq)]
-pub enum DeltaModeConf {Constant, Auto}
 
 #[derive(Clone)]
 pub struct CopaConfig {
@@ -188,7 +134,7 @@ impl<T: Ipc> Copa<T> {
     }
 
     fn delay_control(&mut self, rtt: u32, actual_acked: u32, now: u64) {
-        let increase = rtt as u64 * 1460u64 > (((rtt - self.rtt_win.get_min_rtt()) as f64) * self.delta as f64 * self.cwnd as f64) as u64;
+        let increase = rtt as u64 * 1460u64 > (((rtt - self.rtt_win.get_min_rtt()) as f64) * self.delta_manager.get_delta() as f64 * self.cwnd as f64) as u64;
 
         let mut acked = actual_acked;
         // Just in case. Sometimes CCP returns after significantly longer than
@@ -243,12 +189,13 @@ impl<T: Ipc> Copa<T> {
         }
         else {
             let mut velocity = 1u64;
-            if (increase && self.prev_direction > 0) || (!increase && self.prev_direction < 0) {
+            if (increase && self.prev_direction > 0) ||
+                (!increase && self.prev_direction < 0) {
                 velocity = self.velocity as u64;
             }
             // Do computations in u64 to avoid overflow. Multiply first so
             // integer division doesn't cause as many problems
-            let change = (velocity * 1448 * (acked as u64) / (self.cwnd as f32 * self.delta) as u64) as u32;
+            let change = (velocity * 1448 * (acked as u64) / (self.cwnd as f32 * self.delta_manager.get_delta()) as u64) as u32;
             self.logger.as_ref().map(|log| {
                 debug!(log, "delay control";
                        "cwnd" => self.cwnd,
@@ -291,29 +238,6 @@ impl<T: Ipc> Copa<T> {
         // self.send_pattern();
         // return;
     }
-
-    /// Handle sacked or lost packets
-    /// Only call with loss > 0 || sacked > 0
-    fn cwnd_reduction(&mut self, loss: u32, sacked: u32, acked: u32) {
-        // if loss indicator is nonzero
-        // AND the losses in the lossy cwnd have not yet been accounted for
-        // OR there is a partial ACK AND cwnd was probing ss_thresh
-
-        // if loss > 0 && self.curr_cwnd_reduction == 0 || (acked > 0 && self.cwnd == self.ss_thresh) {
-        //     self.cwnd /= 2;
-        //     if self.cwnd <= self.init_cwnd {
-        //         self.cwnd = self.init_cwnd;
-        //     }
-
-        //     self.ss_thresh = self.cwnd;
-        //     self.send_pattern();
-        // }
-
-        // self.curr_cwnd_reduction += sacked + loss;
-        // self.logger.as_ref().map(|log| {
-        //     info!(log, "loss"; "curr_cwnd (pkts)" => self.cwnd / 1448, "loss" => loss, "sacked" => sacked, "curr_cwnd_deficit" => self.curr_cwnd_reduction);
-        // });
-    }
 }
 
 impl<T: Ipc> CongAlg<T> for Copa<T> {
@@ -329,12 +253,10 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
             logger: cfg.logger,
             cwnd: info.init_cwnd,
             init_cwnd: info.init_cwnd,
-            curr_cwnd_reduction: 0,
             sc: None,
-            delta_manager: DeltaManager::new(cfg.config.delta_mode),
+            delta_manager: DeltaManager::new(cfg.config.default_delta, cfg.config.delta_mode),
             sock_id: info.sock_id,
             slow_start: true,
-            delta: cfg.config.default_delta,
             rtt_win: RTTWindow::new(),
             pkts_in_last_rtt: 0,
             velocity: 1,
@@ -358,42 +280,28 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
     }
 
     fn measurement(&mut self, _sock_id: u32, m: Measurement) {
-        let (acked, was_timeout, sacked, loss, inflight, rtt, now, min_rtt) = self.get_fields(m);
+        let (acked, was_timeout, _sacked, loss, inflight, rtt, now, min_rtt) = self.get_fields(m);
         if acked == 0 {
             // Nothing happened, so ignore
             return;
         }
+
         if was_timeout {
             self.handle_timeout();
             return;
         }
+
+        // Record RTT
         self.rtt_win.new_rtt_sample(min_rtt, now);
 
-        // Update delta mode
-        let intersend = self.rtt_win.get_min_rtt() * 1460 / self.cwnd;
-        self.delta_manager.report_rtt_measurement(min_rtt, self.rtt_win.get_min_rtt(), intersend, now);
+        // Update delta mode and delta
+        self.delta_manager.report_measurement(&mut self.rtt_win, acked, loss, now);
 
         // Increase/decrease the cwnd corresponding to new measurements
         self.delay_control(min_rtt, acked, now);
 
-        //let acked = (over_cnt + under_cnt) as u32;
-        if loss > 0 || sacked > 0 {
-            self.cwnd_reduction(loss, sacked, acked);
-        } else if acked < self.curr_cwnd_reduction {
-            self.curr_cwnd_reduction -= acked / 1448u32;
-        } else {
-            self.curr_cwnd_reduction = 0;
-        }
-
-        if self.curr_cwnd_reduction > 0 {
-            self.logger.as_ref().map(|log| {
-                debug!(log, "in cwnd reduction"; "acked" => acked / 1448u32, "deficit" => self.curr_cwnd_reduction);
-            });
-            return;
-        }
-
+        // Send decisions to CCP
         self.send_pattern();
-        //self.sc = Some(self.install_fold().expect("could not install fold function"));
 
         self.logger.as_ref().map(|log| {
             debug!(log, "got ack";
@@ -401,7 +309,7 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
                 "curr_cwnd (pkts)" => self.cwnd / 1460,
                 "inflight (pkts)" => inflight,
                 "loss" => loss,
-                "delta" => self.delta,
+                "delta" => self.delta_manager.get_delta(),
                 "rtt" => rtt,
                 "min_rtt" => self.rtt_win.get_min_rtt(),
                 "velocity" => self.velocity,

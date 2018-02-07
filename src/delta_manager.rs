@@ -31,6 +31,9 @@ impl DeltaManager {
             DeltaModeConf::NoTCP => DeltaMode::Default,
             DeltaModeConf::Auto => DeltaMode::TCPCoop,
         };
+        if default_delta > 1.0 {
+            panic!("Default delta should be less than or equal to 1.");
+        }
         Self {
             switch_mode: mode,
             default_delta: default_delta,
@@ -81,7 +84,9 @@ impl DeltaManager {
             DeltaMode::Default => {
                 // Coming from TCPCoop mode
                 if self.delta < self.default_delta {
-                    self.delta = 1. / (1. + 1. / self.delta);
+                    if self.delta < 1.0 {
+                        self.delta = 1. / (1. / self.delta - 1.);
+                    }
                     if self.delta > self.default_delta {
                         self.delta = self.default_delta;
                     }
