@@ -61,7 +61,7 @@ impl RTTWindow {
                 self.rtts.pop_front();
             }
 
-        // If necessary, recompute rtt
+        // If necessary, recompute min rtt
         if recompute_min_rtt {
             self.min_rtt = std::u32::MAX;
             for x in self.rtts.iter() {
@@ -147,5 +147,9 @@ impl RTTWindow {
         let n = self.num_increase + self.num_decrease;
         println!("n = {}, k = {}, p = {}", n, k, self.get_binom_test(n, k));
         self.get_binom_test(n, k) <= 0.05
+    }
+
+    pub fn num_tcp_detect_samples(&self) -> u32 {
+        self.num_increase + self.num_decrease
     }
 }
