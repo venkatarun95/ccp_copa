@@ -23,8 +23,8 @@ pub struct RTTWindow {
     // Number of increases and decreases in the current `increase` window
     num_increase: u32,
     num_decrease: u32,
-    // Cached results of binomial test coefficients (n, k) -> probability
-    binom_cache: HashMap<(u32, u32), f32>,
+    // Cached results of binomial test coefficients (n, k) -> probability < threshold
+    binom_cache: HashMap<(u32, u32), bool>,
 }
 
 impl RTTWindow {
@@ -73,7 +73,7 @@ impl RTTWindow {
         }
 
         // Delete all old increase/decrease samples
-        while self.increase.len() > 30 {
+        while self.increase.len() > 40 {
             let increase: bool = self.increase.front().unwrap().1;
             if increase {self.num_increase -= 1;}
             else {self.num_decrease -= 1;}
@@ -88,8 +88,8 @@ impl RTTWindow {
     pub fn new_rtt_sample(&mut self, rtt: u32, now: u64) {
         assert!(self.rtts.len() == self.times.len());
         let tcp = self.tcp_detected();
-        println!("num_increase = {}, num_decrease = {}, cur_min_rtt = {}, prev_min_rtt = {}, tcp = {}",
-                 self.num_increase, self.num_decrease, self.cur_min_rtt, self.prev_min_rtt, tcp);
+        println!("num_increase = {}, num_decrease = {}, prev_min_rtt = {}, cur_min_rtt = {}, greater = {}, tcp = {}",
+                 self.num_increase, self.num_decrease, self.cur_min_rtt, self.prev_min_rtt, self.cur_min_rtt > self.prev_min_rtt, tcp);
         // Push back data
         self.rtts.push_back(rtt);
         self.times.push_back(now);
@@ -120,33 +120,45 @@ impl RTTWindow {
 
     // Return probability that in n tosses of a fair coin, <= k will be tails.
     // Result is cached for efficiency
-    fn get_binom_test(&mut self, n: u32, mut k: u32) -> f32 {
+    fn get_binom_test(&mut self, n: u32, mut k: u32) -> bool {
         if k > n/2 {
             k = n-k;
         }
         if self.binom_cache.contains_key(&(n, k)) {
             return self.binom_cache.get(&(n, k)).unwrap().clone();
         }
-        let mut num = 1f64;
-        let mut inv_fact = 1f64;
-        let mut denom = 1f64;
-        for i in 0..k {
-            if i <= k {
-                inv_fact *= (n-i) as f64;
-                denom *= (i+1) as f64;
-                num += inv_fact/denom;
+        let res;
+        if n < 30 {
+            let mut num = 1f64;
+            let mut inv_fact = 1f64;
+            let mut denom = 1f64;
+            for i in 0..k {
+                if i <= k {
+                    inv_fact *= (n-i) as f64;
+                    denom *= (i+1) as f64;
+                    num += inv_fact/denom;
+                }
             }
+            let prob = (num) / (1 << n) as f64;
+            res = prob < 0.05;
+            self.binom_cache.insert((n, k), res);
         }
-        let res = (num) / (1 << n) as f64;
-        self.binom_cache.insert((n, k), res as f32);
-        res as f32
+        else {
+            // Approximate as normal
+            let z_thresh = 1.645; // For 95% confidence
+            let z = (k as f32 - n as f32 * 0.5) / (n as f32 * 0.25).sqrt();
+            println!("n = {}, k = {}, z = {}", n, k, z);
+            res = z.abs() > z_thresh;
+            self.binom_cache.insert((n, k), res);
+        }
+        res
     }
 
     pub fn tcp_detected(&mut self) -> bool {
         let k = self.num_increase;
         let n = self.num_increase + self.num_decrease;
         println!("n = {}, k = {}, p = {}", n, k, self.get_binom_test(n, k));
-        self.get_binom_test(n, k) <= 0.05
+        self.get_binom_test(n, k)
     }
 
     pub fn num_tcp_detect_samples(&self) -> u32 {
