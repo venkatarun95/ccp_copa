@@ -13,7 +13,7 @@ use portus::lang::Scope;
 mod rtt_window;
 mod delta_manager;
 use rtt_window::RTTWindow;
-use delta_manager::DeltaManager;
+use delta_manager::{DeltaManager, DeltaMode};
 pub use delta_manager::DeltaModeConf;
 
 pub struct Copa<T: Ipc> {
@@ -62,7 +62,7 @@ impl<T: Ipc> Copa<T> {
                 // In bytes/s
                 pattern::Event::SetRateAbs(self.compute_rate()) =>
                 pattern::Event::SetCwndAbs(self.cwnd) =>
-                pattern::Event::WaitRtts(0.5) => 
+                pattern::Event::WaitRtts(0.25) => 
                 pattern::Event::Report
             ),
         ) {
@@ -154,14 +154,6 @@ impl<T: Ipc> Copa<T> {
         // will wrap around. Handle this.
 
         if now - self.prev_update_rtt >= rtt as u64 && !self.slow_start {
-            self.logger.as_ref().map(|log| {
-                debug!(log, "velocity control";
-                      "cur_direction" => self.cur_direction,
-                      "prev_direction" => self.prev_direction,
-                      "pkts_in_last_rtt" => self.pkts_in_last_rtt,
-                );
-            });
-
             if (self.prev_direction > 0 && self.cur_direction > 0)
                 || (self.prev_direction < 0 && self.cur_direction < 0) {
                 self.velocity *= 2;
@@ -196,13 +188,6 @@ impl<T: Ipc> Copa<T> {
             // Do computations in u64 to avoid overflow. Multiply first so
             // integer division doesn't cause as many problems
             let change = (velocity * 1448 * (acked as u64) / (self.cwnd as f32 * self.delta_manager.get_delta()) as u64) as u32;
-            self.logger.as_ref().map(|log| {
-                debug!(log, "delay control";
-                       "cwnd" => self.cwnd,
-                       "change" => change,
-                       "init_cwnd" => self.init_cwnd,
-                );
-            });
 
             if increase {
                 self.cwnd += change;
@@ -288,7 +273,7 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
 
         if was_timeout {
             self.handle_timeout();
-            return;
+            //return;
         }
 
         // Record RTT
@@ -303,16 +288,22 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
         // Send decisions to CCP
         self.send_pattern();
 
+        let tcp_mode = match self.delta_manager.get_mode() {
+            DeltaMode::Default => "const",
+            DeltaMode::TCPCoop => "tcp",
+            DeltaMode::Loss => "loss",
+        };
         self.logger.as_ref().map(|log| {
             debug!(log, "got ack";
-                "acked(pkts)" => acked / 1448u32,
-                "curr_cwnd (pkts)" => self.cwnd / 1460,
-                "inflight (pkts)" => inflight,
-                "loss" => loss,
-                "delta" => self.delta_manager.get_delta(),
-                "rtt" => rtt,
-                "min_rtt" => self.rtt_win.get_min_rtt(),
-                "velocity" => self.velocity,
+                   "acked(pkts)" => acked / 1448u32,
+                   "curr_cwnd (pkts)" => self.cwnd / 1460,
+                   "inflight (pkts)" => inflight,
+                   "loss" => loss,
+                   "delta" => self.delta_manager.get_delta(),
+                   "rtt" => rtt,
+                   "min_rtt" => self.rtt_win.get_min_rtt(),
+                   "velocity" => self.velocity,
+                   "mode" => tcp_mode,
             );
         });
     }

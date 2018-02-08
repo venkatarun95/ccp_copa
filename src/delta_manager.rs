@@ -3,8 +3,8 @@ use rtt_window::RTTWindow;
 #[derive(Clone, Eq, PartialEq)]
 pub enum DeltaModeConf {NoTCP, Auto}
 
-#[derive(Eq, PartialEq)]
-enum DeltaMode {Default, TCPCoop, Loss}
+#[derive(Clone, Eq, PartialEq)]
+pub enum DeltaMode {Default, TCPCoop, Loss}
 
 pub struct DeltaManager {
     // Configuration on how to choose delta
@@ -124,5 +124,9 @@ impl DeltaManager {
 
     pub fn get_delta(&self) -> f32 {
         self.delta
+    }
+
+    pub fn get_mode(&self) -> DeltaMode {
+        self.cur_mode.clone()
     }
 }
