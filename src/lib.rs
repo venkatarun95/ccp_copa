@@ -15,6 +15,8 @@ mod delta_manager;
 use rtt_window::RTTWindow;
 use delta_manager::{DeltaManager, DeltaMode};
 pub use delta_manager::DeltaModeConf;
+mod agg_measurement;
+use agg_measurement::{AggMeasurement, ReportStatus};
 
 pub struct Copa<T: Ipc> {
     control_channel: Datapath<T>,
@@ -26,11 +28,11 @@ pub struct Copa<T: Ipc> {
     init_cwnd: u32,
     slow_start: bool,
     rtt_win: RTTWindow,
-    pkts_in_last_rtt: u64,
     velocity: u32,
     cur_direction: i64,
     prev_direction: i64,
     prev_update_rtt: u64,
+    agg_measurement: AggMeasurement,
 }
 
 #[derive(Clone)]
@@ -62,7 +64,7 @@ impl<T: Ipc> Copa<T> {
                 // In bytes/s
                 pattern::Event::SetRateAbs(self.compute_rate()) =>
                 pattern::Event::SetCwndAbs(self.cwnd) =>
-                pattern::Event::WaitRtts(0.25) => 
+                pattern::Event::WaitRtts(0.1) => 
                 pattern::Event::Report
             ),
         ) {
@@ -95,43 +97,38 @@ impl<T: Ipc> Copa<T> {
         ).unwrap())
     }
 
-    fn get_fields(&mut self, m: Measurement) -> (u32, bool, u32, u32, u32, u32, u64, u32) {
-        let sc = self.sc.as_ref().expect("scope should be initialized");
+    // fn create(control: Datapath<T>, cfg: Config<T, Copa<T>>, info: DatapathInfo) -> Self {
+    //     let mut s = Self {
+    //         control_channel: control,
+    //         logger: cfg.logger,
+    //         cwnd: info.init_cwnd,
+    //         init_cwnd: info.init_cwnd,
+    //         sc: None,
+    //         delta_manager: DeltaManager::new(cfg.config.default_delta, cfg.config.delta_mode),
+    //         sock_id: info.sock_id,
+    //         slow_start: true,
+    //         rtt_win: RTTWindow::new(),
+    //         pkts_in_last_rtt: 0,
+    //         velocity: 1,
+    //         cur_direction: 0,
+    //         prev_direction: 0,
+    //         prev_update_rtt: 0,
+    //         agg_measurement: AggMeasurement::new(0.5),
+    //     };
 
-        let acked = m.get_field(&String::from("Flow.acked"), sc).expect(
-            "expected acked field in returned measurement",
-        ) as u32;
+    //     if cfg.config.init_cwnd != 0 {
+    //         s.cwnd = cfg.config.init_cwnd;
+    //         s.init_cwnd = cfg.config.init_cwnd;
+    //     }
 
-        let sack = m.get_field(&String::from("Flow.sacked"), sc).expect(
-            "expected sacked field in returned measurement",
-        ) as u32;
+    //     s.logger.as_ref().map(|log| {
+    //         info!(log, "starting copa flow"; "sock_id" => info.sock_id);
+    //     });
 
-        let was_timeout = m.get_field(&String::from("Flow.timeout"), sc).expect(
-            "expected timeout field in returned measurement",
-        ) as u32;
-
-        let inflight = m.get_field(&String::from("Flow.inflight"), sc).expect(
-            "expected inflight field in returned measurement",
-        ) as u32;
-
-        let loss = m.get_field(&String::from("Flow.loss"), sc).expect(
-            "expected loss field in returned measurement",
-        ) as u32;
-
-        let rtt = m.get_field(&String::from("Flow.rtt"), sc).expect(
-            "expected rtt field in returned measurement",
-        ) as u32;
-
-        let now = m.get_field(&String::from("Flow.now"), sc).expect(
-            "expected now field in returned measurement",
-        ) as u64;
-
-        let min_rtt = m.get_field(&String::from("Flow.minrtt"), sc).expect(
-            "expected minrtt field in returned measurement",
-        ) as u32;
-
-        (acked, was_timeout == 1, sack, loss, inflight, rtt, now, min_rtt)
-    }
+    //     s.sc = Some(s.install_fold().expect("could not install fold function"));
+    //     s.send_pattern();
+    //     s
+    // }
 
     fn delay_control(&mut self, rtt: u32, actual_acked: u32, now: u64) {
         let increase = rtt as u64 * 1460u64 > (((rtt - self.rtt_win.get_min_rtt()) as f64) * self.delta_manager.get_delta() as f64 * self.cwnd as f64) as u64;
@@ -149,7 +146,6 @@ impl<T: Ipc> Copa<T> {
         else {
             self.cur_direction -= 1;
         }
-        //self.pkts_in_last_rtt += over_cnt + under_cnt;
         // TODO(venkatar): Time (now) may be a u32 internally, which means it
         // will wrap around. Handle this.
 
@@ -166,8 +162,7 @@ impl<T: Ipc> Copa<T> {
             }
             self.prev_direction = self.cur_direction;
             self.cur_direction = 0;
-            //self.pkts_in_last_rtt = 0;
-            self.prev_update_rtt = now;
+           self.prev_update_rtt = now;
         }
 
         // Change window
@@ -243,11 +238,11 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
             sock_id: info.sock_id,
             slow_start: true,
             rtt_win: RTTWindow::new(),
-            pkts_in_last_rtt: 0,
             velocity: 1,
             cur_direction: 0,
             prev_direction: 0,
             prev_update_rtt: 0,
+            agg_measurement: AggMeasurement::new(0.5),
         };
 
         if cfg.config.init_cwnd != 0 {
@@ -265,25 +260,28 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
     }
 
     fn measurement(&mut self, _sock_id: u32, m: Measurement) {
-        let (acked, was_timeout, _sacked, loss, inflight, rtt, now, min_rtt) = self.get_fields(m);
-        if acked == 0 {
-            // Nothing happened, so ignore
-            return;
+        let (report_status, was_timeout, acked, _sacked, loss, inflight, rtt,
+             min_rtt, now) = self.agg_measurement.report(m, &self.sc);
+        if report_status == ReportStatus::UrgentReport {
+            if was_timeout {
+                self.handle_timeout();
+            }
+            self.delta_manager.report_measurement(&mut self.rtt_win,
+                                                  0, loss, now);
         }
+        else if report_status == ReportStatus::NoReport ||
+            acked + loss + _sacked == 0{
+                // Do nothing
+            }
+        else {
+            // Record RTT
+            self.rtt_win.new_rtt_sample(min_rtt, now);
+            // Update delta mode and delta
+            self.delta_manager.report_measurement(&mut self.rtt_win, acked, loss, now);
 
-        if was_timeout {
-            self.handle_timeout();
-            //return;
+            // Increase/decrease the cwnd corresponding to new measurements
+            self.delay_control(min_rtt, acked, now);
         }
-
-        // Record RTT
-        self.rtt_win.new_rtt_sample(min_rtt, now);
-
-        // Update delta mode and delta
-        self.delta_manager.report_measurement(&mut self.rtt_win, acked, loss, now);
-
-        // Increase/decrease the cwnd corresponding to new measurements
-        self.delay_control(min_rtt, acked, now);
 
         // Send decisions to CCP
         self.send_pattern();
