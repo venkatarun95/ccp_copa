@@ -2,11 +2,9 @@ extern crate clap;
 
 #[macro_use]
 extern crate slog;
-#[macro_use]
 extern crate portus;
 
-use portus::{CongAlg, Config, Datapath, DatapathInfo, Measurement};
-use portus::pattern;
+use portus::{CongAlg, Config, Datapath, DatapathInfo, DatapathTrait, Report};
 use portus::ipc::Ipc;
 use portus::lang::Scope;
 
@@ -21,9 +19,8 @@ use agg_measurement::{AggMeasurement, ReportStatus};
 pub struct Copa<T: Ipc> {
     control_channel: Datapath<T>,
     logger: Option<slog::Logger>,
-    sc: Option<Scope>,
+    sc: Scope,
     delta_manager: DeltaManager,
-    sock_id: u32,
     cwnd: u32,
     init_cwnd: u32,
     slow_start: bool,
@@ -54,81 +51,51 @@ impl Default for CopaConfig {
 
 impl<T: Ipc> Copa<T> {
     fn compute_rate(&self) -> u32 {
-        (2 * self.cwnd as u64 * 1000000 / self.rtt_win.get_min_rtt() as u64) as u32
+        (2 * self.cwnd as u64 * 1_000_000 / self.rtt_win.get_min_rtt() as u64) as u32
     }
 
-    fn send_pattern(&self) {
-        match self.control_channel.send_pattern(
-            self.sock_id,
-            make_pattern!(
-                // In bytes/s
-                pattern::Event::SetRateAbs(self.compute_rate()) =>
-                pattern::Event::SetCwndAbs(self.cwnd) =>
-                pattern::Event::WaitRtts(0.1) => 
-                pattern::Event::Report
-            ),
-        ) {
-            Ok(_) => (),
-            Err(e) => {
-                self.logger.as_ref().map(|log| {
-                    warn!(log, "send_pattern"; "err" => ?e);
-                });
-            }
-        }
+    fn update(&self) {
+        self.control_channel.update_field(
+            &self.sc, 
+            &[("Cwnd", self.cwnd), ("Rate", self.compute_rate())],
+        ).unwrap()
     }
 
-    fn install_fold(&self) -> Option<Scope> {
-        Some(self.control_channel.install_measurement(
-            self.sock_id,
-            "
-                (def (acked 0) (sacked 0) (loss 0) (inflight 0) (timeout false) (rtt 0) (now 0
-) (minrtt +infinity))
-                (bind Flow.acked (+ Flow.acked Pkt.bytes_acked))
-                (bind Flow.inflight Pkt.packets_in_flight)
-                (bind Flow.rtt Pkt.rtt_sample_us)
-                (bind Flow.minrtt (min Flow.minrtt Pkt.rtt_sample_us))
-                (bind Flow.sacked (+ Flow.sacked Pkt.packets_misordered))
-                (bind Flow.loss Pkt.lost_pkts_sample)
-                (bind Flow.timeout Pkt.was_timeout)
-                (bind Flow.now Pkt.now)
-                (bind isUrgent Pkt.was_timeout)
-                (bind isUrgent (!if isUrgent (> Flow.loss 0)))
-            ".as_bytes(),
-        ).unwrap())
+    fn install(&self) -> Scope {
+        self.control_channel.install(
+            b"
+                (def 
+                    (Report.acked 0)
+                    (Report.sacked 0) 
+                    (Report.loss 0)
+                    (Report.inflight 0)
+                    (Report.timeout false)
+                    (Report.rtt 0)
+                    (Report.now 0)
+                    (Report.minrtt +infinity)
+                )
+                (when true
+                    (bind Report.acked (+ Report.acked Ack.bytes_acked))
+                    (bind Report.inflight Ack.packets_in_flight)
+                    (bind Report.rtt Flow.rtt_sample_us)
+                    (bind Report.minrtt (min Report.minrtt Flow.rtt_sample_us))
+                    (bind Report.sacked (+ Report.sacked Ack.packets_misordered))
+                    (bind Report.loss Ack.lost_pkts_sample)
+                    (bind Report.timeout Flow.was_timeout)
+                    (bind Report.now Ack.now)
+                    (fallthrough)
+                )
+                (when (|| Flow.was_timeout (> Report.loss 0))
+                    (report)
+                    (reset)
+                )
+                (when (> Micros (/ Report.rtt 2))
+                    (report)
+                    (reset)
+                )
+            ",
+        ).unwrap()
     }
-
-    // fn create(control: Datapath<T>, cfg: Config<T, Copa<T>>, info: DatapathInfo) -> Self {
-    //     let mut s = Self {
-    //         control_channel: control,
-    //         logger: cfg.logger,
-    //         cwnd: info.init_cwnd,
-    //         init_cwnd: info.init_cwnd,
-    //         sc: None,
-    //         delta_manager: DeltaManager::new(cfg.config.default_delta, cfg.config.delta_mode),
-    //         sock_id: info.sock_id,
-    //         slow_start: true,
-    //         rtt_win: RTTWindow::new(),
-    //         pkts_in_last_rtt: 0,
-    //         velocity: 1,
-    //         cur_direction: 0,
-    //         prev_direction: 0,
-    //         prev_update_rtt: 0,
-    //         agg_measurement: AggMeasurement::new(0.5),
-    //     };
-
-    //     if cfg.config.init_cwnd != 0 {
-    //         s.cwnd = cfg.config.init_cwnd;
-    //         s.init_cwnd = cfg.config.init_cwnd;
-    //     }
-
-    //     s.logger.as_ref().map(|log| {
-    //         info!(log, "starting copa flow"; "sock_id" => info.sock_id);
-    //     });
-
-    //     s.sc = Some(s.install_fold().expect("could not install fold function"));
-    //     s.send_pattern();
-    //     s
-    // }
 
     fn delay_control(&mut self, rtt: u32, actual_acked: u32, now: u64) {
         let increase = rtt as u64 * 1460u64 > (((rtt - self.rtt_win.get_min_rtt()) as f64) * self.delta_manager.get_delta() as f64 * self.cwnd as f64) as u64;
@@ -215,7 +182,6 @@ impl<T: Ipc> Copa<T> {
         //     );
         // });
 
-        // self.send_pattern();
         // return;
     }
 }
@@ -233,9 +199,8 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
             logger: cfg.logger,
             cwnd: info.init_cwnd,
             init_cwnd: info.init_cwnd,
-            sc: None,
+            sc: Default::default(),
             delta_manager: DeltaManager::new(cfg.config.default_delta, cfg.config.delta_mode),
-            sock_id: info.sock_id,
             slow_start: true,
             rtt_win: RTTWindow::new(),
             velocity: 1,
@@ -254,23 +219,33 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
             info!(log, "starting copa flow"; "sock_id" => info.sock_id);
         });
 
-        s.sc = Some(s.install_fold().expect("could not install fold function"));
-        s.send_pattern();
+        s.sc = s.install();
+        s.update();
         s
     }
 
-    fn measurement(&mut self, _sock_id: u32, m: Measurement) {
-        let (report_status, was_timeout, acked, _sacked, loss, inflight, rtt,
-             min_rtt, now) = self.agg_measurement.report(m, &self.sc);
+    fn on_report(&mut self, _sock_id: u32, m: Report) {
+        let (
+            report_status, 
+            was_timeout, 
+            acked, 
+            sacked, 
+            loss, 
+            inflight, 
+            rtt,
+            min_rtt, 
+            now,
+        ) = self.agg_measurement.report(m, &self.sc);
         if report_status == ReportStatus::UrgentReport {
             if was_timeout {
                 self.handle_timeout();
             }
+
             self.delta_manager.report_measurement(&mut self.rtt_win,
                                                   0, loss, now);
         }
         else if report_status == ReportStatus::NoReport ||
-            acked + loss + _sacked == 0{
+            acked + loss + sacked == 0 {
                 // Do nothing
             }
         else {
@@ -284,24 +259,22 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
         }
 
         // Send decisions to CCP
-        self.send_pattern();
+        self.update();
 
-        let tcp_mode = match self.delta_manager.get_mode() {
-            DeltaMode::Default => "const",
-            DeltaMode::TCPCoop => "tcp",
-            DeltaMode::Loss => "loss",
-        };
         self.logger.as_ref().map(|log| {
             debug!(log, "got ack";
-                   "acked(pkts)" => acked / 1448u32,
-                   "curr_cwnd (pkts)" => self.cwnd / 1460,
-                   "inflight (pkts)" => inflight,
-                   "loss" => loss,
-                   "delta" => self.delta_manager.get_delta(),
-                   "rtt" => rtt,
-                   "min_rtt" => self.rtt_win.get_min_rtt(),
-                   "velocity" => self.velocity,
-                   "mode" => tcp_mode,
+                "acked(pkts)" => acked / 1448u32,
+                "curr_cwnd (pkts)" => self.cwnd / 1460,
+                "loss" => loss,
+                "delta" => self.delta_manager.get_delta(),
+                "min_rtt" => min_rtt,
+                "win_min_rtt" => self.rtt_win.get_min_rtt(),
+                "velocity" => self.velocity,
+                "mode" => match self.delta_manager.get_mode() {
+                    DeltaMode::Default => "const",
+                    DeltaMode::TCPCoop => "tcp",
+                    DeltaMode::Loss => "loss",
+                },
             );
         });
     }

@@ -1,6 +1,6 @@
 use std;
 
-use portus::Measurement;
+use portus::Report;
 use portus::lang::Scope;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -38,38 +38,36 @@ impl AggMeasurement {
         }
     }
 
-    pub fn report(&mut self, m: Measurement, sc: &Option<Scope>) -> (ReportStatus, bool, u32, u32, u32, u32, u32, u32, u64) {
-        let sc = sc.as_ref().expect("scope should be initialized");
-
-        let acked = m.get_field(&String::from("Flow.acked"), sc).expect(
+    pub fn report(&mut self, m: Report, sc: &Scope) -> (ReportStatus, bool, u32, u32, u32, u32, u32, u32, u64) {
+        let acked = m.get_field("Report.acked", sc).expect(
             "expected acked field in returned measurement",
         ) as u32;
 
-        let sacked = m.get_field(&String::from("Flow.sacked"), sc).expect(
+        let sacked = m.get_field("Report.sacked", sc).expect(
             "expected sacked field in returned measurement",
         ) as u32;
 
-        let was_timeout = m.get_field(&String::from("Flow.timeout"), sc).expect(
+        let was_timeout = m.get_field("Report.timeout", sc).expect(
             "expected timeout field in returned measurement",
         ) as u32;
 
-        let inflight = m.get_field(&String::from("Flow.inflight"), sc).expect(
+        let inflight = m.get_field("Report.inflight", sc).expect(
             "expected inflight field in returned measurement",
         ) as u32;
 
-        let loss = m.get_field(&String::from("Flow.loss"), sc).expect(
+        let loss = m.get_field("Report.loss", sc).expect(
             "expected loss field in returned measurement",
         ) as u32;
 
-        let rtt = m.get_field(&String::from("Flow.rtt"), sc).expect(
+        let rtt = m.get_field("Report.rtt", sc).expect(
             "expected rtt field in returned measurement",
         ) as u32;
 
-        let now = m.get_field(&String::from("Flow.now"), sc).expect(
+        let now = m.get_field("Report.now", sc).expect(
             "expected now field in returned measurement",
         ) as u64;
 
-        let min_rtt = m.get_field(&String::from("Flow.minrtt"), sc).expect(
+        let min_rtt = m.get_field("Report.minrtt", sc).expect(
             "expected minrtt field in returned measurement",
         ) as u32;
 
