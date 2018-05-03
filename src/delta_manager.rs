@@ -76,6 +76,7 @@ impl DeltaManager {
             }
             else {
                 self.cur_mode = DeltaMode::Default;
+                self.delta = self.default_delta;
             }
         }
 
