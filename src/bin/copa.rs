@@ -11,7 +11,7 @@ extern crate portus;
 
 use clap::Arg;
 use ccp_copa::Copa;
-use portus::ipc::Backend;
+use portus::ipc::{BackendBuilder, ListenMode};
 
 fn make_logger() -> slog::Logger {
     let decorator = slog_term::TermDecorator::new().build();
@@ -29,7 +29,7 @@ fn make_args() -> Result<(ccp_copa::CopaConfig, String), std::num::ParseIntError
              .long("ipc")
              .help("Sets the type of ipc to use: (netlink|unix)")
              .default_value("unix")
-             .validator(portus::ipc_valid))
+             .validator(portus::algs::ipc_valid))
         .arg(Arg::with_name("init_cwnd")
              .long("init_cwnd")
              .help("Sets the initial congestion window, in bytes. Setting 0 will use datapath default.")
@@ -61,17 +61,16 @@ fn main() {
     match ipc.as_str() {
         "unix" => {
             use portus::ipc::unix::Socket;
-            let b = Socket::new("in","out").and_then(|sk| Backend::new(sk)).expect(
-                "ipc initialization",
-            );
-
-            portus::start::<_, Copa<Socket>>(
+            let b = Socket::new("in", "out")
+                .map(|sk| BackendBuilder {sock: sk,  mode: ListenMode::Blocking})
+                .expect("ipc initialization");
+            portus::run::<_, Copa<_>>(
                 b,
-                portus::Config {
+                &portus::Config {
                     logger: Some(log),
                     config: cfg,
-                },
-            );
+                }
+                ).unwrap();
         }
         _ => unreachable!(),
     }
@@ -88,31 +87,30 @@ fn main() {
     match ipc.as_str() {
         "unix" => {
             use portus::ipc::unix::Socket;
-            let b = Socket::new("in","out").and_then(|sk| Backend::new(sk)).expect(
-                "ipc initialization",
-            );
-
-            portus::start::<_, Copa<Socket>>(
+            let b = Socket::new("in", "out")
+                .map(|sk| BackendBuilder {sock: sk,  mode: ListenMode::Blocking})
+                .expect("ipc initialization");
+            portus::run::<_, Copa<_>>(
                 b,
-                portus::Config {
+                &portus::Config {
                     logger: Some(log),
                     config: cfg,
-                },
-            );
+                }
+                ).unwrap();
         }
+        #[cfg(all(target_os = "linux"))]
         "netlink" => {
             use portus::ipc::netlink::Socket;
-            let b = Socket::new().and_then(|sk| Backend::new(sk)).expect(
-                "ipc initialization",
-            );
-
-            portus::start::<_, Copa<Socket>>(
+            let b = Socket::new()
+                .map(|sk| BackendBuilder {sock: sk,  mode: ListenMode::Blocking})
+                .expect("ipc initialization");
+            portus::run::<_, Copa<_>>(
                 b,
-                portus::Config {
+                &portus::Config {
                     logger: Some(log),
                     config: cfg,
-                },
-            );
+                }
+                ).unwrap();
         }
         _ => unreachable!(),
     }
