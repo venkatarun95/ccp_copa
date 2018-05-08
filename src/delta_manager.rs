@@ -79,26 +79,13 @@ impl DeltaManager {
                 self.delta = self.default_delta;
             }
         }
-
+        self.cur_mode = DeltaMode::Default;
+        
         // Set delta
         match self.cur_mode {
             DeltaMode::Default => {
                 // Coming from TCPCoop mode
-                if self.delta < self.default_delta {
-                    if self.delta < 1.0 {
-                        self.delta = 1. / (1. / self.delta - 1.);
-                    }
-                    if self.delta > self.default_delta {
-                        self.delta = self.default_delta;
-                    }
-                }
-                // Coming from Loss mode
-                else if self.delta > self.default_delta {
-                    self.delta /= 2.;
-                    if self.delta < self.default_delta {
-                        self.delta = self.default_delta;
-                    }
-                }
+                self.delta = self.default_delta;
             }
             DeltaMode::TCPCoop => {
                 if lost > 0 {

@@ -85,6 +85,8 @@ impl RTTWindow {
     pub fn new_rtt_sample(&mut self, rtt: u32, now: u64) {
         assert!(self.rtts.len() == self.times.len());
         println!("Measurement rtt: {}, min_rtt: {}", rtt, self.min_rtt);
+        self.max_time = std::cmp::max(10_000_000, 30 * rtt as u64);
+
         // Push back data
         self.rtts.push_back(rtt);
         self.times.push_back(now);

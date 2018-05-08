@@ -21,6 +21,7 @@ pub struct Copa<T: Ipc> {
     logger: Option<slog::Logger>,
     sc: Scope,
     delta_manager: DeltaManager,
+    prev_report_time: u64,
     cwnd: u32,
     init_cwnd: u32,
     slow_start: bool,
@@ -89,7 +90,7 @@ impl<T: Ipc> Copa<T> {
                     (report)
                     (reset)
                 )
-                (when (> Micros (/ Report.rtt 2))
+                (when (> Micros (/ Report.minrtt 2))
                     (report)
                     (reset)
                 )
@@ -113,10 +114,15 @@ impl<T: Ipc> Copa<T> {
         else {
             self.cur_direction -= 1;
         }
-        // TODO(venkatar): Time (now) may be a u32 internally, which means it
-        // will wrap around. Handle this.
+
+        if self.velocity > 1 && ((increase && self.prev_direction < 0) ||
+                            (!increase && self.prev_direction > 0)) {
+            self.velocity = 1;
+        }
 
         if now - self.prev_update_rtt >= rtt as u64 && !self.slow_start {
+            // TODO(venkatar): Time (now) may be a u32 internally, which means it
+            // will wrap around. Handle this.
             if (self.prev_direction > 0 && self.cur_direction > 0)
                 || (self.prev_direction < 0 && self.cur_direction < 0) {
                 self.velocity *= 2;
@@ -129,7 +135,7 @@ impl<T: Ipc> Copa<T> {
             }
             self.prev_direction = self.cur_direction;
             self.cur_direction = 0;
-           self.prev_update_rtt = now;
+            self.prev_update_rtt = now;
         }
 
         // Change window
@@ -208,6 +214,7 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
             prev_direction: 0,
             prev_update_rtt: 0,
             agg_measurement: AggMeasurement::new(0.5),
+            prev_report_time: 0,
         };
 
         if cfg.config.init_cwnd != 0 {
@@ -275,7 +282,9 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
                     DeltaMode::TCPCoop => "tcp",
                     DeltaMode::Loss => "loss",
                 },
+                   "report_interval" => now - self.prev_report_time,
             );
         });
+        self.prev_report_time = now;
     }
 }
