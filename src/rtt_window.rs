@@ -86,6 +86,12 @@ impl RTTWindow {
         assert!(self.rtts.len() == self.times.len());
         println!("Measurement rtt: {}, min_rtt: {}", rtt, self.min_rtt);
         self.max_time = std::cmp::max(10_000_000, 30 * rtt as u64);
+        if now < self.max_time {
+            self.max_time = 0;
+        }
+        else {
+            self.max_time = now - self.max_time;
+        }
 
         // Push back data
         self.rtts.push_back(rtt);
@@ -110,8 +116,6 @@ impl RTTWindow {
 
         // Delete old data
         self.clear_old_hist(now);
-
-        self.max_time = std::cmp::min(10_000_000, 20 * self.min_rtt as u64);
     }
 
     pub fn tcp_detected(&mut self) -> bool {
