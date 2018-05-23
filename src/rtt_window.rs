@@ -7,6 +7,7 @@ pub struct RTTWindow {
     max_time: u64,
     // Minimum RTT in current sample
     min_rtt: u32,
+    srtt: u32,
 
     // RTT measurements
     rtts: VecDeque<u32>,
@@ -30,6 +31,7 @@ impl RTTWindow {
         Self {
             max_time: 10_000_000,
             min_rtt: std::u32::MAX,
+            srtt: 0,
 
             rtts: VecDeque::new(),
             times: VecDeque::new(),
@@ -84,8 +86,7 @@ impl RTTWindow {
 
     pub fn new_rtt_sample(&mut self, rtt: u32, now: u64) {
         assert!(self.rtts.len() == self.times.len());
-        println!("Measurement rtt: {}, min_rtt: {}", rtt, self.min_rtt);
-        self.max_time = std::cmp::max(10_000_000, 30 * rtt as u64);
+        self.max_time = std::cmp::max(10_000_000, 30 * self.srtt as u64);
         if now < self.max_time {
             self.max_time = 0;
         }
@@ -100,6 +101,14 @@ impl RTTWindow {
         // Update min. RTT
         if rtt < self.min_rtt {
             self.min_rtt = rtt;
+        }
+
+        // Update srtt
+        if self.srtt == 0 {
+            self.srtt = rtt;
+        } else {
+            let alpha = 1. / 16.0f64;
+            self.srtt = ((1. - alpha) * self.srtt as f64 + alpha * rtt as f64) as u32;
         }
 
         // Update increase
@@ -128,7 +137,7 @@ impl RTTWindow {
 
         for i in 0..(self.rtts.len()) {
             if self.times[i] >
-                self.times.back().unwrap() - self.min_rtt as u64*8 {
+                self.times.back().unwrap() - self.srtt as u64*10 {
                     min1 = std::cmp::min(min1, self.rtts[i]);
                     max = std::cmp::max(max, self.rtts[i]);
                 }
@@ -140,8 +149,8 @@ impl RTTWindow {
         }
 
         let thresh = self.min_rtt + (max - self.min_rtt) / 10 + 100;
-        println!("min1 = {}, max = {}, thresh = {}", min1, max, thresh);
         let res = min1 > thresh;
+        println!("min1: {}, max: {}, thresh: {}", min1, max, thresh);
         res
     }
 

@@ -79,8 +79,7 @@ impl DeltaManager {
                 self.delta = self.default_delta;
             }
         }
-        self.cur_mode = DeltaMode::Default;
-        
+
         // Set delta
         match self.cur_mode {
             DeltaMode::Default => {

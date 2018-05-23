@@ -120,7 +120,7 @@ impl<T: Ipc> Copa<T> {
             self.velocity = 1;
         }
 
-        if now - self.prev_update_rtt >= rtt as u64 && !self.slow_start {
+        if now - self.prev_update_rtt >= 2*rtt as u64 && !self.slow_start {
             // TODO(venkatar): Time (now) may be a u32 internally, which means it
             // will wrap around. Handle this.
             if (self.prev_direction > 0 && self.cur_direction > 0)
@@ -153,9 +153,17 @@ impl<T: Ipc> Copa<T> {
                 (!increase && self.prev_direction < 0) {
                 velocity = self.velocity as u64;
             }
+
+            // If we are in TCP mode, delta changes with time. Account for that.
+            let delta = match !increase &&
+                self.delta_manager.get_mode() == DeltaMode::TCPCoop {
+                false => self.delta_manager.get_delta(),
+                true => 1. / (1. + 1. / self.delta_manager.get_delta())
+            };
+
             // Do computations in u64 to avoid overflow. Multiply first so
             // integer division doesn't cause as many problems
-            let change = (velocity * 1448 * (acked as u64) / (self.cwnd as f32 * self.delta_manager.get_delta()) as u64) as u32;
+            let change = (velocity * 1448 * (acked as u64) / (self.cwnd as f32 * delta) as u64) as u32;
 
             if increase {
                 self.cwnd += change;
