@@ -29,6 +29,7 @@ pub struct Copa<T: Ipc> {
     velocity: u32,
     cur_direction: i64,
     prev_direction: i64,
+    time_since_direction: u64,
     prev_update_rtt: u64,
     agg_measurement: AggMeasurement,
 }
@@ -118,6 +119,7 @@ impl<T: Ipc> Copa<T> {
         if self.velocity > 1 && ((increase && self.prev_direction < 0) ||
                             (!increase && self.prev_direction > 0)) {
             self.velocity = 1;
+            self.time_since_direction = now;
         }
 
         if now - self.prev_update_rtt >= 2*rtt as u64 && !self.slow_start {
@@ -125,10 +127,16 @@ impl<T: Ipc> Copa<T> {
             // will wrap around. Handle this.
             if (self.prev_direction > 0 && self.cur_direction > 0)
                 || (self.prev_direction < 0 && self.cur_direction < 0) {
-                self.velocity *= 2;
+                    if (now - self.time_since_direction) as u32 > 3*rtt {
+                        self.velocity *= 2;
+                    }
+                    else {
+                        assert!(self.velocity == 1);
+                    }
             }
             else {
                 self.velocity = 1;
+                self.time_since_direction = now;
             }
             if self.velocity > 0xffff {
                 self.velocity = 0xffff;
@@ -172,31 +180,25 @@ impl<T: Ipc> Copa<T> {
                 if change + self.init_cwnd > self.cwnd {
                     self.cwnd = self.init_cwnd;
                     self.velocity = 1;
+                    self.time_since_direction = now;
                 }
                 else {
                     self.cwnd -= change;
                 }
             }
         }
+        assert!(self.cwnd >= self.init_cwnd);
     }
 
     fn handle_timeout(&mut self) {
-        // self.ss_thresh /= 2;
-        // if self.ss_thresh < self.init_cwnd {
-        //     self.ss_thresh = self.init_cwnd;
-        // }
+        self.cwnd = self.init_cwnd;
+        self.slow_start = true;
 
-        // self.cwnd = self.init_cwnd;
-        // self.curr_cwnd_reduction = 0;
-
-        // self.logger.as_ref().map(|log| {
-        //     warn!(log, "timeout"; 
-        //         "curr_cwnd (pkts)" => self.cwnd / 1448, 
-        //         "ssthresh" => self.ss_thresh,
-        //     );
-        // });
-
-        // return;
+        self.logger.as_ref().map(|log| {
+            warn!(log, "timeout";
+                "curr_cwnd (pkts)" => self.cwnd / 1448,
+            );
+        });
     }
 }
 
@@ -220,6 +222,7 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
             velocity: 1,
             cur_direction: 0,
             prev_direction: 0,
+            time_since_direction: 0,
             prev_update_rtt: 0,
             agg_measurement: AggMeasurement::new(0.5),
             prev_report_time: 0,
@@ -290,7 +293,7 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
                     DeltaMode::TCPCoop => "tcp",
                     DeltaMode::Loss => "loss",
                 },
-                   "report_interval" => now - self.prev_report_time,
+                "report_interval" => now - self.prev_report_time,
             );
         });
         self.prev_report_time = now;
