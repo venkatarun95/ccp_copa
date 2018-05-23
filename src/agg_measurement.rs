@@ -38,7 +38,7 @@ impl AggMeasurement {
         }
     }
 
-    pub fn report(&mut self, m: Report, sc: &Scope) -> (ReportStatus, bool, u32, u32, u32, u32, u32, u32, u64) {
+    pub fn report(&mut self, m: Report, sc: &Scope) -> (ReportStatus, bool, u32, u32, u32, u32, u32, u32, u32, u64) {
         let acked = m.get_field("Report.acked", sc).expect(
             "expected acked field in returned measurement",
         ) as u32;
@@ -71,13 +71,17 @@ impl AggMeasurement {
             "expected minrtt field in returned measurement",
         ) as u32;
 
+        let max_rtt = m.get_field("Report.maxrtt", sc).expect(
+            "expected maxrtt field in returned measurement",
+        ) as u32;
+
         self.acked += acked;
         self.sacked = sacked;
         self.min_rtt = std::cmp::min(self.min_rtt, min_rtt);
 
         if was_timeout == 1 || loss > 0 {
             return (ReportStatus::UrgentReport, (was_timeout == 1), 0, 0, loss,
-                    0, 0, 0, now);
+                    0, 0, 0, 0, now);
         }
 
         if rtt != 0 {
@@ -90,7 +94,7 @@ impl AggMeasurement {
         if now > 0 && self.last_report_time <
             now - (self.srtt * self.reporting_interval) as u64 {
                 let res = (ReportStatus::Report, false, self.acked, self.sacked,
-                           loss, inflight, self.rtt, self.min_rtt, now);
+                           loss, inflight, self.rtt, self.min_rtt, max_rtt, now);
                 self.last_report_time = now;
                 self.acked = 0;
                 self.sacked = 0;
@@ -99,7 +103,7 @@ impl AggMeasurement {
                 return res;
         }
         else {
-            return (ReportStatus::NoReport, false, 0, 0, 0, 0, 0, 0, now);
+            return (ReportStatus::NoReport, false, 0, 0, 0, 0, 0, 0, 0, now);
         }
     }
 }
