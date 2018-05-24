@@ -105,6 +105,9 @@ impl DeltaManager {
                 if lost > 0 {
                     self.delta *= 2.;
                 }
+                if self.delta >= self.default_delta {
+                    self.delta = self.default_delta;
+                }
             }
         };
     }
