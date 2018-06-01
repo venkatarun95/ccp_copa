@@ -95,7 +95,7 @@ impl<T: Ipc> Copa<T> {
                     (report)
                     (reset)
                 )
-            ",
+            ", None,
         ).unwrap()
     }
 
