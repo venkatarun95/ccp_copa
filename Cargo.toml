@@ -9,4 +9,4 @@ slog = "2"
 slog-term = "2"
 slog-async = "2"
 time="0.1"
-portus = { path = "./portus" }
+portus = { git = "https://github.com/ccp-project/portus" }

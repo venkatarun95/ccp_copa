@@ -11,7 +11,7 @@ extern crate portus;
 
 use clap::Arg;
 use ccp_copa::Copa;
-use portus::ipc::{BackendBuilder, ListenMode};
+use portus::ipc::{BackendBuilder, Blocking};
 
 fn make_logger() -> slog::Logger {
     let decorator = slog_term::TermDecorator::new().build();
@@ -87,8 +87,8 @@ fn main() {
     match ipc.as_str() {
         "unix" => {
             use portus::ipc::unix::Socket;
-            let b = Socket::new("in", "out")
-                .map(|sk| BackendBuilder {sock: sk,  mode: ListenMode::Blocking})
+            let b = Socket::<Blocking>::new("in", "out")
+                .map(|sk| BackendBuilder {sock: sk})
                 .expect("ipc initialization");
             portus::run::<_, Copa<_>>(
                 b,
@@ -101,8 +101,8 @@ fn main() {
         #[cfg(all(target_os = "linux"))]
         "netlink" => {
             use portus::ipc::netlink::Socket;
-            let b = Socket::new()
-                .map(|sk| BackendBuilder {sock: sk,  mode: ListenMode::Blocking})
+            let b = Socket::<Blocking>::new()
+                .map(|sk| BackendBuilder {sock: sk})
                 .expect("ipc initialization");
             portus::run::<_, Copa<_>>(
                 b,

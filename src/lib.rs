@@ -89,13 +89,11 @@ impl<T: Ipc> Copa<T> {
                 )
                 (when (|| Flow.was_timeout (> Report.loss 0))
                     (report)
-                    (reset)
                 )
                 (when (> Micros (/ Report.minrtt 2))
                     (report)
-                    (reset)
                 )
-            ",
+            ", None,
         ).unwrap()
     }
 
