@@ -53,7 +53,7 @@ impl Default for CopaConfig {
 
 impl<T: Ipc> Copa<T> {
     fn compute_rate(&self) -> u32 {
-        (2 * self.cwnd as u64 * 1_000_000 / self.rtt_win.get_min_rtt() as u64) as u32
+        (2 * self.cwnd as u64 * 1_000_000 / self.rtt_win.get_base_rtt() as u64) as u32
     }
 
     fn update(&self) {
@@ -66,31 +66,37 @@ impl<T: Ipc> Copa<T> {
     fn install(&self) -> Scope {
         self.control_channel.install(
             b"
-                (def 
-                    (Report.acked 0)
-                    (Report.sacked 0) 
-                    (Report.loss 0)
-                    (Report.inflight 0)
-                    (Report.timeout false)
-                    (Report.rtt 0)
-                    (Report.now 0)
-                    (Report.minrtt +infinity)
+                (def
+                    (Report 
+                        (volatile acked 0)
+                        (volatile sacked 0) 
+                        (volatile loss 0)
+                        (volatile inflight 0)
+                        (volatile timeout false)
+                        (volatile rtt 0)
+                        (volatile now 0)
+                        (volatile minrtt +infinity)
+                   )
+                    (basertt +infinity)
                 )
                 (when true
-                    (bind Report.acked (+ Report.acked Ack.bytes_acked))
-                    (bind Report.inflight Ack.packets_in_flight)
-                    (bind Report.rtt Flow.rtt_sample_us)
-                    (bind Report.minrtt (min Report.minrtt Flow.rtt_sample_us))
-                    (bind Report.sacked (+ Report.sacked Ack.packets_misordered))
-                    (bind Report.loss Ack.lost_pkts_sample)
-                    (bind Report.timeout Flow.was_timeout)
-                    (bind Report.now Ack.now)
+                    (:= Report.acked (+ Report.acked Ack.bytes_acked))
+                    (:= Report.inflight Ack.packets_in_flight)
+                    (:= Report.rtt Flow.rtt_sample_us)
+                    (:= Report.minrtt (min Report.minrtt Flow.rtt_sample_us))
+                    (:= basertt (min basertt Flow.rtt_sample_us))
+                    (:= Report.sacked (+ Report.sacked Ack.packets_misordered))
+                    (:= Report.loss Ack.lost_pkts_sample)
+                    (:= Report.timeout Flow.was_timeout)
+                    (:= Report.now Ack.now)
                     (fallthrough)
                 )
                 (when (|| Flow.was_timeout (> Report.loss 0))
+                    (:= Micros 0)
                     (report)
                 )
-                (when (> Micros (/ Report.minrtt 2))
+                (when (> Micros (/ basertt 2))
+                    (:= Micros 0)
                     (report)
                 )
             ", None,
@@ -98,7 +104,7 @@ impl<T: Ipc> Copa<T> {
     }
 
     fn delay_control(&mut self, rtt: u32, actual_acked: u32, now: u64) {
-        let increase = rtt as u64 * 1460u64 > (((rtt - self.rtt_win.get_min_rtt()) as f64) * self.delta_manager.get_delta() as f64 * self.cwnd as f64) as u64;
+        let increase = rtt as u64 * 1460u64 > (((rtt - self.rtt_win.get_base_rtt()) as f64) * self.delta_manager.get_delta() as f64 * self.cwnd as f64) as u64;
 
         let mut acked = actual_acked;
         // Just in case. Sometimes CCP returns after significantly longer than
@@ -267,8 +273,11 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
         else {
             // Record RTT
             self.rtt_win.new_rtt_sample(min_rtt, now);
+            if self.rtt_win.did_base_rtt_change() {
+                self.control_channel.update_field(&self.sc, &[("base_rtt", self.rtt_win.get_base_rtt())]);
+            }
             // Update delta mode and delta
-            self.delta_manager.report_measurement(&mut self.rtt_win, acked, loss, now);
+              self.delta_manager.report_measurement(&mut self.rtt_win, acked, loss, now);
 
             // Increase/decrease the cwnd corresponding to new measurements
             self.delay_control(min_rtt, acked, now);
@@ -279,19 +288,20 @@ impl<T: Ipc> CongAlg<T> for Copa<T> {
 
         self.logger.as_ref().map(|log| {
             debug!(log, "got ack";
-                "acked(pkts)" => acked / 1448u32,
-                "curr_cwnd (pkts)" => self.cwnd / 1460,
-                "loss" => loss,
-                "delta" => self.delta_manager.get_delta(),
-                "min_rtt" => min_rtt,
-                "win_min_rtt" => self.rtt_win.get_min_rtt(),
-                "velocity" => self.velocity,
-                "mode" => match self.delta_manager.get_mode() {
-                    DeltaMode::Default => "const",
-                    DeltaMode::TCPCoop => "tcp",
-                    DeltaMode::Loss => "loss",
-                },
-                "report_interval" => now - self.prev_report_time,
+                   "acked(pkts)" => acked / 1448u32,
+                   "curr_cwnd (pkts)" => self.cwnd / 1460,
+                   "loss" => loss,
+                   "sacked" => sacked,
+                   "delta" => self.delta_manager.get_delta(),
+                   "min_rtt" => min_rtt,
+                   "base_rtt" => self.rtt_win.get_base_rtt(),
+                   "velocity" => self.velocity,
+                   "mode" => match self.delta_manager.get_mode() {
+                       DeltaMode::Default => "const",
+                       DeltaMode::TCPCoop => "tcp",
+                       DeltaMode::Loss => "loss",
+                   },
+                   "report_interval" => now - self.prev_report_time,
             );
         });
         self.prev_report_time = now;

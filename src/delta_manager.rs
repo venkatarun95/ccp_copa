@@ -52,7 +52,7 @@ impl DeltaManager {
         // Update loss rate estimate
         self.cur_num_acked += acked;
         self.cur_num_losses += lost;
-        if now > self.prev_loss_cycle + 2 * rtt_win.get_min_rtt() as u64 {
+        if now > self.prev_loss_cycle + 2 * rtt_win.get_base_rtt() as u64 {
             self.prev_loss_cycle = now;
             if self.cur_num_losses + self.cur_num_acked > 0 {
                 self.prev_loss_rate = self.cur_num_losses as f32 /
@@ -88,7 +88,7 @@ impl DeltaManager {
             }
             DeltaMode::TCPCoop => {
                 if lost > 0 {
-                    if now - rtt_win.get_min_rtt() as u64 >
+                    if now - rtt_win.get_base_rtt() as u64 >
                         self.prev_loss_red_time {
                             self.delta *= 2.;
                             self.prev_loss_red_time = now;

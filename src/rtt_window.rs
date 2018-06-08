@@ -5,8 +5,10 @@ pub struct RTTWindow {
     // Maximum time till which to maintain history. It is minimum of 10s and 20
     // RTTs.
     max_time: u64,
-    // Minimum RTT in current sample
-    min_rtt: u32,
+    // Base RTT
+    base_rtt: u32,
+    // Did the base RTT change since the last rtt sample that was reported?
+    base_rtt_changed: bool,
     srtt: u32,
 
     // RTT measurements
@@ -30,7 +32,8 @@ impl RTTWindow {
     pub fn new() -> Self {
         Self {
             max_time: 10_000_000,
-            min_rtt: std::u32::MAX,
+            base_rtt: std::u32::MAX,
+            base_rtt_changed: false,
             srtt: 0,
 
             rtts: VecDeque::new(),
@@ -47,28 +50,29 @@ impl RTTWindow {
     fn clear_old_hist(&mut self, now: u64) {
         assert!(self.rtts.len() == self.times.len());
         // Whether or not min. RTT needs to be recomputed
-        let mut recompute_min_rtt = false;
+        let mut recompute_base_rtt = false;
 
         // Delete all samples older than max_time. However, if there is only one
         // sample left, don't delete it
         while self.times.len() > 1 &&
             self.times.front().unwrap() < &(now - self.max_time) {
-                if self.rtts.front().unwrap() <= &self.min_rtt {
-                    recompute_min_rtt = true;
+                if self.rtts.front().unwrap() <= &self.base_rtt {
+                    recompute_base_rtt = true;
                 }
                 self.times.pop_front();
                 self.rtts.pop_front();
             }
 
         // If necessary, recompute min rtt
-        if recompute_min_rtt {
-            self.min_rtt = std::u32::MAX;
+        if recompute_base_rtt {
+            self.base_rtt = std::u32::MAX;
+            self.base_rtt_changed = true;
             for x in self.rtts.iter() {
-                if *x < self.min_rtt {
-                    self.min_rtt = *x;
+                if *x < self.base_rtt {
+                    self.base_rtt = *x;
                 }
             }
-            assert!(self.min_rtt != std::u32::MAX);
+            assert!(self.base_rtt != std::u32::MAX);
         }
 
         // Delete all old increase/decrease samples
@@ -80,8 +84,12 @@ impl RTTWindow {
         }
     }
 
-    pub fn get_min_rtt(&self) -> u32 {
-        self.min_rtt
+    pub fn get_base_rtt(&self) -> u32 {
+        self.base_rtt
+    }
+
+    pub fn did_base_rtt_change(&self) -> bool {
+        self.base_rtt_changed
     }
 
     pub fn new_rtt_sample(&mut self, rtt: u32, now: u64) {
@@ -99,8 +107,8 @@ impl RTTWindow {
         self.times.push_back(now);
 
         // Update min. RTT
-        if rtt < self.min_rtt {
-            self.min_rtt = rtt;
+        if rtt < self.base_rtt {
+            self.base_rtt = rtt;
         }
 
         // Update srtt
@@ -113,7 +121,7 @@ impl RTTWindow {
 
         // Update increase
         if self.increase.len() == 0 ||
-            self.increase.back().unwrap().0 < now - 2 * self.min_rtt as u64 {
+            self.increase.back().unwrap().0 < now - 2 * self.base_rtt as u64 {
                 let increase = self.cur_min_rtt > self.prev_min_rtt;
                 self.increase.push_back((now, increase));
                 self.prev_min_rtt = self.cur_min_rtt;
@@ -148,7 +156,7 @@ impl RTTWindow {
             //     }
         }
 
-        let thresh = self.min_rtt + (max - self.min_rtt) / 10 + 100;
+        let thresh = self.base_rtt + (max - self.base_rtt) / 10 + 100;
         let res = min1 > thresh;
         println!("min1: {}, max: {}, thresh: {}", min1, max, thresh);
         res
