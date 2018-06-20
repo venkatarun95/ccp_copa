@@ -72,7 +72,7 @@ impl<T: Ipc> Copa<T> {
                         (volatile sacked 0) 
                         (volatile loss 0)
                         (volatile inflight 0)
-                        (volatile timeout false)
+                        (volatile timeout 0)
                         (volatile rtt 0)
                         (volatile now 0)
                         (volatile minrtt +infinity)
@@ -81,7 +81,7 @@ impl<T: Ipc> Copa<T> {
                 )
                 (when true
                     (:= Report.acked (+ Report.acked Ack.bytes_acked))
-                    (:= Report.inflight Ack.packets_in_flight)
+                    (:= Report.inflight Flow.packets_in_flight)
                     (:= Report.rtt Flow.rtt_sample_us)
                     (:= Report.minrtt (min Report.minrtt Flow.rtt_sample_us))
                     (:= basertt (min basertt Flow.rtt_sample_us))
