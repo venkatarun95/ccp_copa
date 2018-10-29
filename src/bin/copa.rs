@@ -1,17 +1,16 @@
 extern crate clap;
+use clap::Arg;
 
 #[macro_use]
 extern crate slog;
-extern crate slog_term;
 extern crate slog_async;
+extern crate slog_term;
 use slog::Drain;
 
 extern crate ccp_copa;
-extern crate portus;
+use ccp_copa::CopaConfig;
 
-use clap::Arg;
-use ccp_copa::Copa;
-use portus::ipc::{BackendBuilder, Blocking};
+extern crate portus;
 
 fn make_logger() -> slog::Logger {
     let decorator = slog_term::TermDecorator::new().build();
@@ -20,7 +19,7 @@ fn make_logger() -> slog::Logger {
     slog::Logger::root(drain, o!())
 }
 
-fn make_args() -> Result<(ccp_copa::CopaConfig, String), std::num::ParseIntError> {
+fn make_args(log: slog::Logger) -> Result<(CopaConfig, String), std::num::ParseIntError> {
     let matches = clap::App::new("CCP Copa")
         .version("0.1.0")
         .author("Venkat Arun <venkatar@mit.edu>")
@@ -42,76 +41,29 @@ fn make_args() -> Result<(ccp_copa::CopaConfig, String), std::num::ParseIntError
 
     Ok((
         ccp_copa::CopaConfig {
+            logger: Some(log),
             init_cwnd: u32::from_str_radix(matches.value_of("init_cwnd").unwrap(), 10)?,
-            default_delta: (matches.value_of("default_delta").unwrap()).parse().unwrap(),
+            default_delta: (matches.value_of("default_delta").unwrap())
+                .parse()
+                .unwrap(),
             delta_mode: ccp_copa::DeltaModeConf::Auto,
         },
         String::from(matches.value_of("ipc").unwrap()),
     ))
 }
 
-#[cfg(not(target_os = "linux"))]
 fn main() {
     let log = make_logger();
-    let (cfg, ipc) = make_args()
+    let (cfg, ipc) = make_args(log.clone())
         .map_err(|e| warn!(log, "bad argument"; "err" => ?e))
-        .unwrap_or(Default::default());
+        .unwrap();
 
-    info!(log, "starting CCP Copa");
-    match ipc.as_str() {
-        "unix" => {
-            use portus::ipc::unix::Socket;
-            let b = Socket::new("in", "out")
-                .map(|sk| BackendBuilder {sock: sk,  mode: ListenMode::Blocking})
-                .expect("ipc initialization");
-            portus::run::<_, Copa<_>>(
-                b,
-                &portus::Config {
-                    logger: Some(log),
-                    config: cfg,
-                }
-                ).unwrap();
-        }
-        _ => unreachable!(),
-    }
-}
+    info!(log, "configured Copa";
+          "ipc" => ipc.clone(),
+          "init_cwnd" => cfg.init_cwnd,
+          "default_delta" => cfg.default_delta,
+          "delta_mode" => ?cfg.delta_mode,
+    );
 
-#[cfg(all(target_os = "linux"))]
-fn main() {
-    let log = make_logger();
-    let (cfg, ipc) = make_args()
-        .map_err(|e| warn!(log, "bad argument"; "err" => ?e))
-        .unwrap_or(Default::default());
-
-    info!(log, "starting CCP Copa");
-    match ipc.as_str() {
-        "unix" => {
-            use portus::ipc::unix::Socket;
-            let b = Socket::<Blocking>::new("in", "out")
-                .map(|sk| BackendBuilder {sock: sk})
-                .expect("ipc initialization");
-            portus::run::<_, Copa<_>>(
-                b,
-                &portus::Config {
-                    logger: Some(log),
-                    config: cfg,
-                }
-                ).unwrap();
-        }
-        #[cfg(all(target_os = "linux"))]
-        "netlink" => {
-            use portus::ipc::netlink::Socket;
-            let b = Socket::<Blocking>::new()
-                .map(|sk| BackendBuilder {sock: sk})
-                .expect("ipc initialization");
-            portus::run::<_, Copa<_>>(
-                b,
-                &portus::Config {
-                    logger: Some(log),
-                    config: cfg,
-                }
-                ).unwrap();
-        }
-        _ => unreachable!(),
-    }
+    portus::start!(ipc.as_str(), Some(log), cfg).unwrap()
 }

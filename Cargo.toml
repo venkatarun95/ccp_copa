@@ -1,12 +1,13 @@
 [package]
 name = "ccp_copa"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Venkat Arun <venkatar@mit.edu>"]
 
 [dependencies]
-clap="2.29"
+clap = "2.29"
+fnv = "1"
+portus = "^0.4.1"
 slog = "2"
-slog-term = "2"
 slog-async = "2"
-time="0.1"
-portus = { git = "https://github.com/ccp-project/portus" }
+slog-term = "2"
+time = "0.1"
