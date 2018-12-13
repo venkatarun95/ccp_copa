@@ -1,10 +1,17 @@
 use rtt_window::RTTWindow;
 
-#[derive(Clone, Eq, PartialEq)]
-pub enum DeltaModeConf {NoTCP, Auto}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeltaModeConf {
+    NoTCP,
+    Auto,
+}
 
-#[derive(Clone, Eq, PartialEq)]
-pub enum DeltaMode {Default, TCPCoop, Loss}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeltaMode {
+    Default,
+    TCPCoop,
+    Loss,
+}
 
 pub struct DeltaManager {
     // Configuration on how to choose delta
@@ -47,16 +54,15 @@ impl DeltaManager {
         }
     }
 
-    pub fn report_measurement(&mut self, rtt_win: &mut RTTWindow, acked: u32,
-                              lost: u32, now: u64) {
+    pub fn report_measurement(&mut self, rtt_win: &mut RTTWindow, acked: u32, lost: u32, now: u64) {
         // Update loss rate estimate
         self.cur_num_acked += acked;
         self.cur_num_losses += lost;
         if now > self.prev_loss_cycle + 2 * rtt_win.get_base_rtt() as u64 {
             self.prev_loss_cycle = now;
             if self.cur_num_losses + self.cur_num_acked > 0 {
-                self.prev_loss_rate = self.cur_num_losses as f32 /
-                    (self.cur_num_losses + self.cur_num_acked) as f32;
+                self.prev_loss_rate =
+                    self.cur_num_losses as f32 / (self.cur_num_losses + self.cur_num_acked) as f32;
             }
             self.cur_num_acked = 0;
             self.cur_num_losses = 0;
@@ -66,15 +72,13 @@ impl DeltaManager {
         // If we are losing more than 10% of packets, move to loss mode. Period.
         if self.prev_loss_rate >= 0.1 {
             self.cur_mode = DeltaMode::Loss;
-        }
-        else {
+        } else {
             // See if we need to be in TCP mode
-            if self.switch_mode == DeltaModeConf::Auto &&
-                (rtt_win.num_tcp_detect_samples() < 10 ||
-                 rtt_win.tcp_detected()) {
-                    self.cur_mode = DeltaMode::TCPCoop;
-            }
-            else {
+            if self.switch_mode == DeltaModeConf::Auto
+                && (rtt_win.num_tcp_detect_samples() < 10 || rtt_win.tcp_detected())
+            {
+                self.cur_mode = DeltaMode::TCPCoop;
+            } else {
                 self.cur_mode = DeltaMode::Default;
                 self.delta = self.default_delta;
             }
@@ -88,19 +92,17 @@ impl DeltaManager {
             }
             DeltaMode::TCPCoop => {
                 if lost > 0 {
-                    if now - rtt_win.get_base_rtt() as u64 >
-                        self.prev_loss_red_time {
-                            self.delta *= 2.;
-                            self.prev_loss_red_time = now;
+                    if now - rtt_win.get_base_rtt() as u64 > self.prev_loss_red_time {
+                        self.delta *= 2.;
+                        self.prev_loss_red_time = now;
                     }
-                }
-                else {
+                } else {
                     self.delta = 1. / (1. + 1. / self.delta);
                 }
                 if self.delta > self.default_delta {
                     self.delta = self.default_delta;
                 }
-            },
+            }
             DeltaMode::Loss => {
                 if lost > 0 {
                     self.delta *= 2.;
