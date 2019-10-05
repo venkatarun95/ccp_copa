@@ -53,7 +53,7 @@ impl<T: Ipc> Copa<T> {
         self.control_channel
             .update_field(
                 &self.sc,
-                &[("Cwnd", self.cwnd), ("Rate", self.compute_rate())],
+                &[("Cwnd", self.cwnd * 8), ("Rate", self.compute_rate())],
             )
             .unwrap()
     }
@@ -169,9 +169,9 @@ impl<T: Ipc> CongAlg<T> for CopaConfig {
         vec![(
             "copa",
             "(def
-                (Report 
+                (Report
                     (volatile acked 0)
-                    (volatile sacked 0) 
+                    (volatile sacked 0)
                     (volatile loss 0)
                     (volatile inflight 0)
                     (volatile timeout 0)
