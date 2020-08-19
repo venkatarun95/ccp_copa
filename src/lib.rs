@@ -1,6 +1,5 @@
 extern crate clap;
-extern crate fnv;
-use fnv::FnvHashMap;
+use std::collections::HashMap;
 
 #[macro_use]
 extern crate slog;
@@ -165,7 +164,7 @@ impl<T: Ipc> CongAlg<T> for CopaConfig {
         "copa"
     }
 
-    fn datapath_programs(&self) -> FnvHashMap<&'static str, String> {
+    fn datapath_programs(&self) -> HashMap<&'static str, String> {
         vec![(
             "copa",
             "(def
