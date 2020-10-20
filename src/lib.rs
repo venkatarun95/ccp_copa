@@ -1,6 +1,5 @@
 extern crate clap;
-extern crate fnv;
-use fnv::FnvHashMap;
+use std::collections::HashMap;
 
 #[macro_use]
 extern crate slog;
@@ -50,11 +49,16 @@ impl<T: Ipc> Copa<T> {
     }
 
     fn update(&self) {
+        let rate = std::cmp::max(self.compute_rate(), 2_000);
+        self.logger.as_ref().map(|log| {
+            debug!(log, "update";
+                "curr_cwnd (pkts)" => self.cwnd / 1460,
+                "rate" => rate,
+            );
+        });
+
         self.control_channel
-            .update_field(
-                &self.sc,
-                &[("Cwnd", self.cwnd), ("Rate", self.compute_rate())],
-            )
+            .update_field(&self.sc, &[("Cwnd", self.cwnd), ("Rate", rate)])
             .unwrap()
     }
 
@@ -165,7 +169,7 @@ impl<T: Ipc> CongAlg<T> for CopaConfig {
         "copa"
     }
 
-    fn datapath_programs(&self) -> FnvHashMap<&'static str, String> {
+    fn datapath_programs(&self) -> HashMap<&'static str, String> {
         vec![(
             "copa",
             "(def
@@ -274,7 +278,7 @@ impl<T: Ipc> portus::Flow for Copa<T> {
         self.update();
 
         self.logger.as_ref().map(|log| {
-            debug!(log, "got ack";
+            info!(log, "got ack";
                    "acked(pkts)" => acked / 1448u32,
                    "curr_cwnd (pkts)" => self.cwnd / 1460,
                    "loss" => loss,

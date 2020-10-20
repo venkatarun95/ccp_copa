@@ -5,8 +5,7 @@ authors = ["Venkat Arun <venkatar@mit.edu>"]
 
 [dependencies]
 clap = "2.29"
-fnv = "1"
-portus = "^0.4.1"
+portus = "^0.5"
 slog = "2"
 slog-async = "2"
 slog-term = "2"
